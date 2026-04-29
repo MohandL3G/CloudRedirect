@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
+#include <cstdarg>
 #include <cstddef>
 #include <cstring>
 #include <sstream>
@@ -26,6 +27,7 @@
 #include <optional>
 #include <chrono>
 #include <limits>
+#include <thread>
 
 namespace CloudIntercept {
 
@@ -81,16 +83,9 @@ static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD25180;
 static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EB5F0;
 
 // steamclient64.dll RVAs for service-method vtable hook (Approach E)
-// CClientUnifiedServiceTransport vtable (IDA addr 0x13924F910)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x124F910;
-// Slot 4 (offset +0x20) = request/response direct function (BYieldingSendMessageAndGetReply)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT4 = 0x124F930;
-// Slot 5 (offset +0x28) = request/response wrapper function we hook
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT5 = 0x124F938;
-// Slot 7 (offset +0x38) = notification direct function
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT7 = 0x124F948;
-// Slot 8 (offset +0x40) = notification wrapper function
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT8 = 0x124F950;
+// CClientUnifiedServiceTransport vtable (RTTI ground truth from IDA on build 10.61.98.96).
+// RTTI walk runs first at install time; this RVA is a fallback if RTTI cannot resolve.
+static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x126AF40;
 // sub_138BE6400 = protobuf ParseFromArray (fills body from raw bytes)
 static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBE6400;
 // sub_138BE69D0 = protobuf SerializeToArray (writes body to raw bytes)
@@ -322,6 +317,13 @@ static NotificationSlot8Fn g_originalSlot8 = nullptr;       // saved original sl
 static ParseFromArrayFn g_parseFromArray = nullptr;          // sub_138BD0210
 static SerializeToArrayFn g_serializeToArray = nullptr;      // sub_138BD07E0
 static std::atomic<bool> g_vtableHookInstalled{false};
+static uintptr_t g_serviceTransportVtableEa = 0;             // resolved via RTTI at install; 0 = unresolved, fall back to RVA
+
+// CClientUnifiedServiceTransport vtable slot offsets (stable interface contract).
+static constexpr size_t kSlot4Off = 0x20;
+static constexpr size_t kSlot5Off = 0x28;
+static constexpr size_t kSlot7Off = 0x38;
+static constexpr size_t kSlot8Off = 0x40;
 
 // Hook reference counter -- incremented on entry to each hook, decremented on exit.
 // Shutdown() spins until this reaches zero before restoring vtable pointers.
@@ -1748,20 +1750,220 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
     return true;
 }
 
+// Conservative MSVC x64 prologue heuristic. False negative => refuse to patch (safe); false positive => crash.
+static bool LooksLikeFunctionPrologue(const uint8_t* p) {
+    if (!p) return false;
+    uint8_t b[8] = {};
+    __try {
+        for (int i = 0; i < 8; ++i) b[i] = p[i];
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (b[0] == 0x48 && b[1] == 0x89 && (b[2] == 0x5C || b[2] == 0x4C || b[2] == 0x54) && b[3] == 0x24) return true;
+    if (b[0] == 0x48 && b[1] == 0x83 && b[2] == 0xEC) return true;
+    if (b[0] == 0x48 && b[1] == 0x81 && b[2] == 0xEC) return true;
+    if (b[0] == 0x4C && b[1] == 0x8B && b[2] == 0xDC) return true;
+    if (b[0] == 0x48 && b[1] == 0x8B && b[2] == 0xC4) return true;
+    if (b[0] == 0x40 && (b[1] == 0x53 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
+    if (b[0] == 0x41 && (b[1] == 0x54 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
+    if (b[0] == 0x53 || b[0] == 0x55 || b[0] == 0x56 || b[0] == 0x57) return true;
+    if (b[0] == 0xE9) return true;
+    return false;
+}
+
+// MSVC-x64 RTTI walk: name(.data|.rdata) -> TD = name-0x10 -> COL in .rdata referencing TD -> vftable backref qword.
+static uintptr_t ResolveServiceTransportVtableViaRtti(uintptr_t scBase) {
+    if (!scBase) return 0;
+
+    auto base = reinterpret_cast<uint8_t*>(scBase);
+    auto dosHdr = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dosHdr->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto ntHdr = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dosHdr->e_lfanew);
+    if (ntHdr->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    uint8_t* rdataStart = nullptr; size_t rdataSize = 0;
+    uint8_t* dataStart  = nullptr; size_t dataSize  = 0;
+    auto sec = IMAGE_FIRST_SECTION(ntHdr);
+    for (WORD i = 0; i < ntHdr->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (memcmp(sec->Name, ".rdata", 6) == 0) {
+            rdataStart = base + sec->VirtualAddress;
+            rdataSize  = sec->Misc.VirtualSize;
+        } else if (memcmp(sec->Name, ".data\0", 6) == 0) {
+            dataStart = base + sec->VirtualAddress;
+            dataSize  = sec->Misc.VirtualSize;
+        }
+    }
+    if (!rdataStart || rdataSize == 0) {
+        LOG("[VtHook-RTTI] .rdata not found");
+        return 0;
+    }
+
+    static const char kName[] = ".?AVCClientUnifiedServiceTransport@@";
+    const size_t kNameLen = sizeof(kName);
+    auto findName = [&](uint8_t* sStart, size_t sSize) -> const uint8_t* {
+        if (!sStart || sSize < kNameLen) return nullptr;
+        const uint8_t* hit = nullptr;
+        __try {
+            const size_t scanEnd = sSize - kNameLen;
+            for (size_t i = 0; i <= scanEnd; ++i) {
+                if (sStart[i] == '.' && memcmp(sStart + i, kName, kNameLen) == 0) {
+                    hit = sStart + i;
+                    break;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return nullptr;
+        }
+        return hit;
+    };
+    const uint8_t* nameAddr = findName(dataStart, dataSize);
+    if (!nameAddr) nameAddr = findName(rdataStart, rdataSize);
+    if (!nameAddr) {
+        LOG("[VtHook-RTTI] type descriptor name not found in .data or .rdata");
+        return 0;
+    }
+
+    const uint8_t* tdAddr = nameAddr - 0x10;
+    const uint32_t tdRva = static_cast<uint32_t>(tdAddr - base);
+
+    const uint8_t* col = nullptr;
+    __try {
+        if (rdataSize >= 4) {
+            for (size_t i = 0; i + 4 <= rdataSize; i += 4) {
+                if (*reinterpret_cast<const uint32_t*>(rdataStart + i) != tdRva) continue;
+                if (i < 0x0C) continue;
+                const uint8_t* candidate = rdataStart + i - 0x0C;
+                const uint32_t sig    = *reinterpret_cast<const uint32_t*>(candidate + 0x00);
+                const uint32_t pSelf  = *reinterpret_cast<const uint32_t*>(candidate + 0x14);
+                if (sig == 1 && pSelf == static_cast<uint32_t>(candidate - base)) {
+                    col = candidate;
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    if (!col) {
+        LOG("[VtHook-RTTI] COL referencing TD RVA 0x%X not found", tdRva);
+        return 0;
+    }
+
+    const uint64_t colAbs = reinterpret_cast<uint64_t>(col);
+    const uint8_t* vtable = nullptr;
+    __try {
+        if (rdataSize >= sizeof(uint64_t)) {
+            for (size_t i = 0; i + sizeof(uint64_t) <= rdataSize; i += sizeof(void*)) {
+                if (*reinterpret_cast<const uint64_t*>(rdataStart + i) == colAbs) {
+                    if (i + 2 * sizeof(uint64_t) > rdataSize) break;
+                    vtable = rdataStart + i + sizeof(uint64_t);
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    if (!vtable) {
+        LOG("[VtHook-RTTI] vftable backref to COL %p not found", col);
+        return 0;
+    }
+
+    const uintptr_t vtEa = reinterpret_cast<uintptr_t>(vtable);
+    LOG("[VtHook-RTTI] resolved CClientUnifiedServiceTransport vftable @ %p (RVA 0x%llX)",
+        (void*)vtEa, (uint64_t)(vtEa - scBase));
+    return vtEa;
+}
+
+// One-shot warning when the vtable hook can't be installed; modal dialog on detached thread.
+static std::atomic<bool> g_vtableHookFailureNotified{false};
+static void RefuseVtableHook(const char* reasonFmt, ...) {
+    char reason[512];
+    va_list ap;
+    va_start(ap, reasonFmt);
+    vsnprintf(reason, sizeof(reason), reasonFmt, ap);
+    va_end(ap);
+
+    LOG("[VtHook] REFUSED: %s", reason);
+
+    if (g_vtableHookFailureNotified.exchange(true)) return;
+
+    std::string msg =
+        "CloudRedirect could not install its primary cloud-save interception hook.\n\n"
+        "Most likely a Steam update changed steamclient64.dll layout.\n\n"
+        "Cloud saves may not be redirected for some games.\n\n"
+        "Please report cloud_redirect.log at\n"
+        "https://github.com/anomalyco/CloudRedirect/issues\n\n"
+        "Reason: ";
+    msg += reason;
+    std::thread([msg]() {
+        MessageBoxA(nullptr, msg.c_str(),
+            "CloudRedirect -- Hook Install Failed",
+            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+    }).detach();
+}
+
 // Install the vtable hook on CClientUnifiedServiceTransport
 static void InstallServiceMethodHook() {
     if (g_vtableHookInstalled.load(std::memory_order_acquire) || !g_steamClientBase) return;
 
-    // Resolve function pointers
-    g_parseFromArray = (ParseFromArrayFn)(g_steamClientBase + SC_RVA_PARSE_FROM_ARRAY);
-    g_serializeToArray = (SerializeToArrayFn)(g_steamClientBase + SC_RVA_SERIALIZE_TO_ARRAY);
+    // Validate Parse/Serialize RVAs before we rely on them; a Steam update can repoint these into garbage.
+    auto candidateParse     = (ParseFromArrayFn)(g_steamClientBase + SC_RVA_PARSE_FROM_ARRAY);
+    auto candidateSerialize = (SerializeToArrayFn)(g_steamClientBase + SC_RVA_SERIALIZE_TO_ARRAY);
+    if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateParse))) {
+        RefuseVtableHook("ParseFromArray RVA 0x%X does not point at a function prologue (Steam update?)",
+            (unsigned)SC_RVA_PARSE_FROM_ARRAY);
+        return;
+    }
+    if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateSerialize))) {
+        RefuseVtableHook("SerializeToArray RVA 0x%X does not point at a function prologue (Steam update?)",
+            (unsigned)SC_RVA_SERIALIZE_TO_ARRAY);
+        return;
+    }
+    g_parseFromArray   = candidateParse;
+    g_serializeToArray = candidateSerialize;
 
     LOG("[VtHook] ParseFromArray=%p SerializeToArray=%p",
         g_parseFromArray, g_serializeToArray);
 
-    // Read slot 4 (request/response direct)
-    uintptr_t vtableSlot4Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT4;
+    // Prefer RTTI walk (build-update-tolerant); fall back to hardcoded RVA if RTTI fails. Validate slot 0 either way.
+    uintptr_t vtableEa = g_serviceTransportVtableEa;
+    if (!vtableEa) {
+        vtableEa = ResolveServiceTransportVtableViaRtti(g_steamClientBase);
+        if (vtableEa) {
+            const uintptr_t slot0 = *reinterpret_cast<uintptr_t*>(vtableEa);
+            if (LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(slot0))) {
+                g_serviceTransportVtableEa = vtableEa;
+            } else {
+                LOG("[VtHook] RTTI resolved vtable %p but slot0=%p is not a function prologue, rejecting",
+                    (void*)vtableEa, (void*)slot0);
+                vtableEa = 0;
+            }
+        }
+        if (!vtableEa) {
+            const uintptr_t fallback = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT;
+            uintptr_t slot0 = 0;
+            __try { slot0 = *reinterpret_cast<uintptr_t*>(fallback); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { slot0 = 0; }
+            if (slot0 && LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(slot0))) {
+                LOG("[VtHook] RTTI resolution failed, falling back to hardcoded RVA 0x%X -> %p",
+                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)fallback);
+                vtableEa = fallback;
+                g_serviceTransportVtableEa = fallback;
+            } else {
+                RefuseVtableHook("RTTI walk + hardcoded RVA 0x%X both failed (slot0=%p not a function prologue) -- Steam update?",
+                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)slot0);
+                return;
+            }
+        }
+    }
 
+    const uintptr_t vtableSlot4Addr = vtableEa + kSlot4Off;
+    const uintptr_t vtableSlot5Addr = vtableEa + kSlot5Off;
+    const uintptr_t vtableSlot7Addr = vtableEa + kSlot7Off;
+    const uintptr_t vtableSlot8Addr = vtableEa + kSlot8Off;
+
+    // Read slot 4 (request/response direct)
     ServiceMethodSlot4Fn currentSlot4 = nullptr;
     __try {
         currentSlot4 = *(ServiceMethodSlot4Fn*)vtableSlot4Addr;
@@ -1769,19 +1971,16 @@ static void InstallServiceMethodHook() {
         LOG("[VtHook] EXCEPTION reading slot 4: code=0x%08X", GetExceptionCode());
         return;
     }
-
-    if (!currentSlot4) {
-        LOG("[VtHook] Vtable slot 4 is NULL at %p", (void*)vtableSlot4Addr);
+    if (!currentSlot4 || !LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(currentSlot4))) {
+        RefuseVtableHook("slot 4 (%p) at %p is not a function prologue",
+            (void*)currentSlot4, (void*)vtableSlot4Addr);
         return;
     }
-
     g_originalSlot4 = currentSlot4;
     LOG("[VtHook] Original slot 4: %p (RVA=0x%llX)",
         (void*)currentSlot4, (uint64_t)((uintptr_t)currentSlot4 - g_steamClientBase));
 
-    // Patch slot 5 (request/response wrapper)
-    uintptr_t vtableSlot5Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT5;
-
+    // Read slot 5 (request/response wrapper)
     ServiceMethodSlot5Fn currentSlot5 = nullptr;
     __try {
         currentSlot5 = *(ServiceMethodSlot5Fn*)vtableSlot5Addr;
@@ -1789,19 +1988,16 @@ static void InstallServiceMethodHook() {
         LOG("[VtHook] EXCEPTION reading slot 5: code=0x%08X", GetExceptionCode());
         return;
     }
-
-    if (!currentSlot5) {
-        LOG("[VtHook] Vtable slot 5 is NULL at %p", (void*)vtableSlot5Addr);
+    if (!currentSlot5 || !LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(currentSlot5))) {
+        RefuseVtableHook("slot 5 (%p) at %p is not a function prologue",
+            (void*)currentSlot5, (void*)vtableSlot5Addr);
         return;
     }
-
     g_originalSlot5 = currentSlot5;
     LOG("[VtHook] Original slot 5: %p (RVA=0x%llX)",
         (void*)currentSlot5, (uint64_t)((uintptr_t)currentSlot5 - g_steamClientBase));
 
-    // Patch slot 7 (notification direct)
-    uintptr_t vtableSlot7Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT7;
-
+    // Read slot 7 (notification direct)
     NotificationSlot7Fn currentSlot7 = nullptr;
     __try {
         currentSlot7 = *(NotificationSlot7Fn*)vtableSlot7Addr;
@@ -1809,19 +2005,16 @@ static void InstallServiceMethodHook() {
         LOG("[VtHook] EXCEPTION reading slot 7: code=0x%08X", GetExceptionCode());
         return;
     }
-
-    if (!currentSlot7) {
-        LOG("[VtHook] Vtable slot 7 is NULL at %p", (void*)vtableSlot7Addr);
+    if (!currentSlot7 || !LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(currentSlot7))) {
+        RefuseVtableHook("slot 7 (%p) at %p is not a function prologue",
+            (void*)currentSlot7, (void*)vtableSlot7Addr);
         return;
     }
-
     g_originalSlot7 = currentSlot7;
     LOG("[VtHook] Original slot 7: %p (RVA=0x%llX)",
         (void*)currentSlot7, (uint64_t)((uintptr_t)currentSlot7 - g_steamClientBase));
 
-    // Patch slot 8 (notification wrapper)
-    uintptr_t vtableSlot8Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT8;
-
+    // Read slot 8 (notification wrapper)
     NotificationSlot8Fn currentSlot8 = nullptr;
     __try {
         currentSlot8 = *(NotificationSlot8Fn*)vtableSlot8Addr;
@@ -1829,19 +2022,16 @@ static void InstallServiceMethodHook() {
         LOG("[VtHook] EXCEPTION reading slot 8: code=0x%08X", GetExceptionCode());
         return;
     }
-
-    if (!currentSlot8) {
-        LOG("[VtHook] Vtable slot 8 is NULL at %p", (void*)vtableSlot8Addr);
+    if (!currentSlot8 || !LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(currentSlot8))) {
+        RefuseVtableHook("slot 8 (%p) at %p is not a function prologue",
+            (void*)currentSlot8, (void*)vtableSlot8Addr);
         return;
     }
-
     g_originalSlot8 = currentSlot8;
     LOG("[VtHook] Original slot 8: %p (RVA=0x%llX)",
         (void*)currentSlot8, (uint64_t)((uintptr_t)currentSlot8 - g_steamClientBase));
 
-    // Make vtable region writable and patch all four slots
-    // Slots 4, 5, 7, 8 span from slot 4 (offset 0x20) to slot 8 (offset 0x40 + 8)
-    // Total region: slot 4 addr to slot 8 addr + sizeof(void*) 
+    // Patch all four slots in one writable window.
     uintptr_t regionStart = vtableSlot4Addr;
     size_t regionSize = (vtableSlot8Addr + sizeof(void*)) - vtableSlot4Addr;
 
@@ -3653,16 +3843,24 @@ static void ShutdownImpl() {
                 (void*)g_steamClientBase, (void*)currentSC);
             g_vtableHookInstalled.store(false, std::memory_order_release);
         } else {
-            uintptr_t vtableSlot4Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT4;
-            uintptr_t vtableSlot8Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT8;
-            uintptr_t regionStart = vtableSlot4Addr;
-            size_t regionSize = (vtableSlot8Addr + sizeof(void*)) - vtableSlot4Addr;
+            // Restore against the same vtable EA we patched. If RTTI never resolved
+            // (shouldn't be possible if g_vtableHookInstalled is true), fall back to
+            // the hardcoded RVA so we still attempt restore.
+            const uintptr_t vtableEa = g_serviceTransportVtableEa
+                                       ? g_serviceTransportVtableEa
+                                       : (g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT);
+            const uintptr_t vtableSlot4Addr = vtableEa + kSlot4Off;
+            const uintptr_t vtableSlot5Addr = vtableEa + kSlot5Off;
+            const uintptr_t vtableSlot7Addr = vtableEa + kSlot7Off;
+            const uintptr_t vtableSlot8Addr = vtableEa + kSlot8Off;
+            const uintptr_t regionStart = vtableSlot4Addr;
+            const size_t regionSize = (vtableSlot8Addr + sizeof(void*)) - vtableSlot4Addr;
 
             DWORD oldProt;
             if (VirtualProtect((void*)regionStart, regionSize, PAGE_READWRITE, &oldProt)) {
                 if (g_originalSlot4) *(ServiceMethodSlot4Fn*)vtableSlot4Addr = g_originalSlot4;
-                if (g_originalSlot5) *(ServiceMethodSlot5Fn*)(g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT5) = g_originalSlot5;
-                if (g_originalSlot7) *(NotificationSlot7Fn*)(g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT7) = g_originalSlot7;
+                if (g_originalSlot5) *(ServiceMethodSlot5Fn*)vtableSlot5Addr = g_originalSlot5;
+                if (g_originalSlot7) *(NotificationSlot7Fn*)vtableSlot7Addr = g_originalSlot7;
                 if (g_originalSlot8) *(NotificationSlot8Fn*)vtableSlot8Addr = g_originalSlot8;
                 VirtualProtect((void*)regionStart, regionSize, oldProt, &oldProt);
                 g_vtableHookInstalled.store(false, std::memory_order_release);
