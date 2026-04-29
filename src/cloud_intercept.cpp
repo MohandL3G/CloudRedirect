@@ -56,7 +56,7 @@ static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 
 // steamclient64.dll RVAs for manifest pinning inline detour
 // IDA image base: 0x138000000
-// sub_1384B72B0 = CUserAppManager::BuildDepotDependency
+// sub_1384C4040 = CUserAppManager::BuildDepotDependency
 // Signature: __int64 __fastcall(QWORD* a1, uint a2, int64 a3, int64 a4, int64 a5, int64 a6, DWORD* a7, BYTE* a8)
 //   a1 (rcx) = CUserAppManager*
 //   a2 (edx) = appId
@@ -64,21 +64,21 @@ static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 //   a5 ([rsp+28h]) = output depot vector (DLC/shared depots)
 // Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
 // Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
-static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4B72B0;
+static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4C4040;
 static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
-// qword_139781D38 = global CSteamEngine* pointer
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x1781D38;
+// qword_1397A60E8 = global CSteamEngine* pointer
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17A60E8;
 // CCMInterface vtable RVA (for validation)
-static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x1271FB8;
-// sub_138D02530 = CNetPacket→CProtoBufNetPacket wrapper
-static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xD02530;
-// sub_138D0EB50 = CJobMgr::BRouteMsgToJob
-static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD0EB50;
-// sub_1380EB160 = Release wrapped packet (CProtoBufNetPacket ref-count release)
-static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EB160;
+static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x128D500;
+// sub_138D187B0 = CNetPacket→CProtoBufNetPacket wrapper
+static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xD187B0;
+// sub_138D25180 = CJobMgr::BRouteMsgToJob
+static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD25180;
+// sub_1380EB5F0 = Release wrapped packet (CProtoBufNetPacket ref-count release)
+static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EB5F0;
 
 // steamclient64.dll RVAs for service-method vtable hook (Approach E)
 // CClientUnifiedServiceTransport vtable (IDA addr 0x13924F910)
@@ -91,14 +91,14 @@ static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT5 = 0x124F938;
 static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT7 = 0x124F948;
 // Slot 8 (offset +0x40) = notification wrapper function
 static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_SLOT8 = 0x124F950;
-// sub_138BD0210 = protobuf ParseFromArray (fills body from raw bytes)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBD0210;
-// sub_138BD07E0 = protobuf SerializeToArray (writes body to raw bytes)
-static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBD07E0;
+// sub_138BE6400 = protobuf ParseFromArray (fills body from raw bytes)
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBE6400;
+// sub_138BE69D0 = protobuf SerializeToArray (writes body to raw bytes)
+static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBE69D0;
 // CUser playtime state helpers
-static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BF480;
-static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CF7E0;
-static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9D2640;
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9D6AA0;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9E7010;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9E9EF0;
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -181,15 +181,15 @@ static_assert(offsetof(JobRouteInfo, jobidTarget) == 8, "");
 static_assert(offsetof(JobRouteInfo, emsg) == 16, "");
 static_assert(offsetof(JobRouteInfo, flags) == 20, "");
 
-// RVA for the refcount helper: sub_138DCA830
+// RVA for the refcount helper: sub_138DE1590
 // This function takes rcx = pointer-to-pointer, reads *rcx to get a pointer,
 // then does InterlockedIncrement64 on that second pointer.
-// RecvPkt calls this with &unk_139771AD8 before calling BRouteMsgToJob.
-static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDCA830;
+// RecvPkt calls this with &unk_139796BD8 before calling BRouteMsgToJob.
+static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDE1590;
 // Global that holds the pointer-to-counter for the refcount helper
-static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x1771AD8;
-// sub_138D11470 = CUtlSortedVector::Find (looks up a CJob by jobId)
-static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD11470;
+static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x1796BD8;
+// sub_138D27AA0 = CUtlSortedVector::Find (looks up a CJob by jobId)
+static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD27AA0;
 
 // SEH exception filter for crash diagnostics
 static thread_local uintptr_t s_crashFaultAddr = 0;
