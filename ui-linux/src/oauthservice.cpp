@@ -183,6 +183,15 @@ void OAuthService::startAuth(const QString &provider, const QString &tokenPath)
             return;
         }
         m_redirectUri = "http://localhost:53682/";
+    } else if (provider == "gdrive") {
+        // Fixed port for Google Drive, ugh
+        if (!m_server->listen(QHostAddress::LocalHost, 53692)) {
+            emit authFailed(provider, "Failed to start local HTTP server on port 53692: " + m_server->errorString());
+            delete m_server;
+            m_server = nullptr;
+            return;
+        }
+        m_redirectUri = "http://localhost:53692/callback";
     } else {
         // Other providers use dynamic port
         if (!m_server->listen(QHostAddress::LocalHost, 0)) {
