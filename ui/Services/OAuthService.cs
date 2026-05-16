@@ -311,10 +311,13 @@ public sealed class OAuthService : IDisposable
             bool hasRefresh = root.TryGetProperty("refresh_token", out var rt)
                               && rt.GetString()?.Length > 0;
 
-            if (!hasRefresh)
-                return new TokenStatus(false, "Token file exists but missing refresh token");
+            bool hasWebDav = root.TryGetProperty("webdav_url", out var wu)
+                             && wu.GetString()?.Length > 0;
 
-            return new TokenStatus(true, "Authenticated.");
+            if (!hasRefresh && !hasWebDav)
+                return new TokenStatus(false, "Token file exists but missing required fields (refresh_token or webdav_url)");
+
+            return new TokenStatus(true, "Authenticated / Configured.");
         }
         catch (Exception ex)
         {
