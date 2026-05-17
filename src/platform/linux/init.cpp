@@ -76,8 +76,33 @@ static void EnsureLogInit()
         Log::Init();
 }
 
+static bool NotificationsEnabled()
+{
+    const char* home = getenv("HOME");
+    if (!home || !home[0]) return true;
+
+    std::string configPath = std::string(home) + "/.config/CloudRedirect/config.json";
+    FILE* f = fopen(configPath.c_str(), "r");
+    if (!f) return true;
+
+    char buf[65536] = {};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+
+    const char* key = strstr(buf, "\"notifications_enabled\"");
+    if (!key) return true;
+
+    const char* p = key + strlen("\"notifications_enabled\"");
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ':') ++p;
+
+    return strncmp(p, "false", 5) != 0;
+}
+
 static void Notify(const char* msg, bool critical = false)
 {
+    if (!NotificationsEnabled()) return;
+
     pid_t pid = fork();
     if (pid == 0) {
         // Child: exec notify-send and exit

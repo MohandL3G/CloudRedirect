@@ -20,6 +20,7 @@ class Backend : public QObject
     Q_PROPERTY(QString providerPath READ providerPath WRITE setProviderPath NOTIFY settingsChanged)
     Q_PROPERTY(QString syncFolderPath READ syncFolderPath WRITE setSyncFolderPath NOTIFY settingsChanged)
     Q_PROPERTY(bool providerAuthenticated READ providerAuthenticated NOTIFY settingsChanged)
+    Q_PROPERTY(bool notificationsEnabled READ notificationsEnabled WRITE setNotificationsEnabled NOTIFY settingsChanged)
     Q_PROPERTY(QString accountId READ accountId NOTIFY statusChanged)
     Q_PROPERTY(QString accountName READ accountName NOTIFY statusChanged)
     Q_PROPERTY(QString version READ version CONSTANT)
@@ -43,6 +44,8 @@ public:
     QString syncFolderPath() const;
     void setSyncFolderPath(const QString &path);
     bool providerAuthenticated() const;
+    bool notificationsEnabled() const;
+    void setNotificationsEnabled(bool enabled);
 
     Q_INVOKABLE QVariantList getManagedApps();
     Q_INVOKABLE QVariantList getAppDetails();
@@ -107,6 +110,7 @@ private:
     QString m_providerPath;
     QString m_syncFolderPath;
     bool m_providerAuthenticated = false;
+    bool m_notificationsEnabled = true;
 
     struct AppInfo {
         uint32_t appId;

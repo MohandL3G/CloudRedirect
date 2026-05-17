@@ -139,6 +139,38 @@ Page {
                 }
             }
 
+            Frame {
+                Layout.fillWidth: true
+                Layout.leftMargin: 20
+                Layout.rightMargin: 20
+
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 8
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+
+                        Label {
+                            text: "Launch Notifications"
+                            font.bold: true
+                        }
+                        Label {
+                            text: "Show a desktop notification when CloudRedirect loads"
+                            opacity: 0.7
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    Switch {
+                        checked: backend ? backend.notificationsEnabled : true
+                        onToggled: { if (backend) backend.notificationsEnabled = checked }
+                    }
+                }
+            }
+
             RowLayout {
                 Layout.leftMargin: 20
                 spacing: 8

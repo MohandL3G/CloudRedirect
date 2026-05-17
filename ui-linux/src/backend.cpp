@@ -284,7 +284,10 @@ void Backend::loadConfig()
     QJsonObject obj = doc.object();
     m_providerName = obj.value("provider").toString("local");
     m_syncFolderPath = obj.value("sync_folder_path").toString();
-    fprintf(stderr, "[Backend] loadConfig: provider=%s syncFolder=%s\n", m_providerName.toUtf8().constData(), m_syncFolderPath.toUtf8().constData());
+    m_notificationsEnabled = obj.value("notifications_enabled").toBool(true);
+    fprintf(stderr, "[Backend] loadConfig: provider=%s syncFolder=%s notifications=%s\n",
+        m_providerName.toUtf8().constData(), m_syncFolderPath.toUtf8().constData(),
+        m_notificationsEnabled ? "true" : "false");
 
     m_providerAuthenticated = false;
     if (m_providerName == "gdrive" || m_providerName == "onedrive") {
@@ -349,6 +352,7 @@ void Backend::saveConfig()
     
     obj["provider"] = m_providerName;
     obj["sync_folder_path"] = m_syncFolderPath;
+    obj["notifications_enabled"] = m_notificationsEnabled;
 
     // Atomic write: write to temp, then rename
     QString tempPath = configPath + ".tmp";
@@ -394,6 +398,14 @@ void Backend::setSyncFolderPath(const QString &path) {
     saveConfig();
 }
 bool Backend::providerAuthenticated() const { return m_providerAuthenticated; }
+
+bool Backend::notificationsEnabled() const { return m_notificationsEnabled; }
+void Backend::setNotificationsEnabled(bool enabled)
+{
+    if (m_notificationsEnabled == enabled) return;
+    m_notificationsEnabled = enabled;
+    saveConfig();
+}
 
 QVariantList Backend::getManagedApps()
 {
