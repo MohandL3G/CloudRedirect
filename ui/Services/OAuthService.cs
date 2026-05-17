@@ -74,6 +74,7 @@ public sealed class OAuthService : IDisposable
 
     // OneDrive (using rclone's public client ID - our Azure AD app has redirect URI issues)
     private const string OneDriveClientId = "b15665d9-eda6-4092-8539-0eec376afd59";
+    private const string OneDriveClientSecret = "qtyfaBBYA403=unZUP40~_#";
     private const string OneDriveScope = "Files.ReadWrite offline_access";
     private const string OneDriveAuthUrl =
         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
@@ -244,7 +245,7 @@ public sealed class OAuthService : IDisposable
             tokens = provider switch
             {
                 "gdrive" => await ExchangeGDriveCodeAsync(code, redirectUriFinal, _codeVerifier!, cancel),
-                "onedrive" => await ExchangeOneDriveCodeAsync(code, redirectUriFinal, _codeVerifier!, cancel),
+                "onedrive" => await ExchangeOneDriveCodeAsync(code, redirectUriFinal, _codeVerifier!, log, cancel),
                 _ => null
             };
         }
@@ -437,25 +438,32 @@ public sealed class OAuthService : IDisposable
     }
 
     private async Task<TokenResult?> ExchangeOneDriveCodeAsync(
-        string code, string redirectUri, string codeVerifier, CancellationToken cancel)
+        string code, string redirectUri, string codeVerifier,
+        Action<string> log, CancellationToken cancel)
     {
-        var body = new FormUrlEncodedContent(new Dictionary<string, string>
+        var fields = new Dictionary<string, string>
         {
             ["code"] = code,
             ["client_id"] = OneDriveClientId,
+            ["client_secret"] = OneDriveClientSecret,
             ["redirect_uri"] = redirectUri,
             ["grant_type"] = "authorization_code",
             ["scope"] = OneDriveScope,
             ["code_verifier"] = codeVerifier
-        });
+        };
 
-        var resp = await _http.PostAsync(OneDriveTokenUrl, body, cancel);
+        log("OneDrive token exchange: exchanging authorization code...");
+        var resp = await _http.PostAsync(OneDriveTokenUrl, new FormUrlEncodedContent(fields), cancel);
         var json = await resp.Content.ReadAsStringAsync(cancel);
 
-        if (!resp.IsSuccessStatusCode)
-            throw new Exception($"Token exchange failed (HTTP {(int)resp.StatusCode}): {json}");
+        if (resp.IsSuccessStatusCode)
+        {
+            log("OneDrive token exchange succeeded.");
+            return ParseTokenResponse(json);
+        }
 
-        return ParseTokenResponse(json);
+        log($"OneDrive token exchange failed (HTTP {(int)resp.StatusCode}): {json}");
+        throw new Exception($"Token exchange failed (HTTP {(int)resp.StatusCode}): {json}");
     }
 
     private static TokenResult ParseTokenResponse(string json)
