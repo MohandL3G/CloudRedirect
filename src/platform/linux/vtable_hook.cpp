@@ -32,14 +32,39 @@ uintptr_t VtableHook::FindSteamclient(size_t& outSize)
         return 0;
     }
 
+    // Two-pass scan: first find steamclient.so's address span from labeled
+    // lines, then capture ALL readable/writable pages in that span (including
+    // anonymous gap pages that hold .data.rel.ro / vtables).
     uintptr_t base = 0;
     uintptr_t end  = 0;
-    uintptr_t lastSteamEnd = 0;
-    bool lastWasSteam = false;
     g_readableCount = 0;
     g_writableCount = 0;
     char line[512];
 
+    // Pass 1: find base/end from lines labeled steamclient.so
+    while (fgets(line, sizeof(line), f))
+    {
+        uintptr_t start_addr, end_addr;
+        if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &start_addr, &end_addr) < 2)
+            continue;
+        if (strstr(line, "steamclient.so"))
+        {
+            if (base == 0 || start_addr < base)
+                base = start_addr;
+            if (end_addr > end)
+                end = end_addr;
+        }
+    }
+
+    if (base == 0)
+    {
+        fclose(f);
+        Log::Error("steamclient.so not found in /proc/self/maps");
+        return 0;
+    }
+
+    // Pass 2: capture all readable/writable pages within the span
+    rewind(f);
     while (fgets(line, sizeof(line), f))
     {
         uintptr_t start_addr, end_addr;
@@ -47,25 +72,14 @@ uintptr_t VtableHook::FindSteamclient(size_t& outSize)
         if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %4s", &start_addr, &end_addr, perms) < 3)
             continue;
 
-        bool isSteamclient = (strstr(line, "steamclient.so") != nullptr);
-        bool isContiguous = (lastWasSteam && start_addr == lastSteamEnd);
-
-        if (isSteamclient || isContiguous)
+        if (start_addr >= base && end_addr <= end)
         {
-            if (base == 0 || start_addr < base)
-                base = start_addr;
-            if (end_addr > end)
-                end = end_addr;
-            lastSteamEnd = end_addr;
-            lastWasSteam = true;
-
             if (perms[0] == 'r' && g_readableCount < 64)
             {
                 g_readableRanges[g_readableCount].start = start_addr;
                 g_readableRanges[g_readableCount].end = end_addr;
                 g_readableCount++;
             }
-            // .data.rel.ro lives in rw- pages
             if (perms[0] == 'r' && perms[1] == 'w' && g_writableCount < 64)
             {
                 g_writableRanges[g_writableCount].start = start_addr;
@@ -73,18 +87,8 @@ uintptr_t VtableHook::FindSteamclient(size_t& outSize)
                 g_writableCount++;
             }
         }
-        else
-        {
-            lastWasSteam = false;
-        }
     }
     fclose(f);
-
-    if (base == 0)
-    {
-        Log::Error("steamclient.so not found in /proc/self/maps");
-        return 0;
-    }
 
     outSize = end - base;
     Log::Info("steamclient.so base=%p end=%p size=0x%zx (%d readable, %d writable ranges)", 
