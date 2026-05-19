@@ -5,3 +5,6 @@ ui/obj/
 ui-linux/build/
 flatpak/.flatpak-builder/
 flatpak/build-dir/
+
+# Agent instructions (not shipped)
+AGENTS.md

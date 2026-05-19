@@ -275,7 +275,15 @@ public static class SteamDetector
             if (root.TryGetProperty("sync_path", out var sp))
                 syncPath = sp.GetString();
 
-            return new CloudConfig(provider, tokenPath, syncPath);
+            string? webdavUrl = null;
+            if (root.TryGetProperty("webdav_url", out var wu))
+                webdavUrl = wu.GetString();
+
+            string? webdavUser = null;
+            if (root.TryGetProperty("webdav_user", out var wus))
+                webdavUser = wus.GetString();
+
+            return new CloudConfig(provider, tokenPath, syncPath, webdavUrl, webdavUser);
         }
         catch
         {
@@ -287,7 +295,12 @@ public static class SteamDetector
 /// <summary>
 /// Parsed contents of cloud_redirect/config.json.
 /// </summary>
-public record CloudConfig(string Provider, string? TokenPath, string? SyncPath)
+public record CloudConfig(
+    string Provider,
+    string? TokenPath,
+    string? SyncPath,
+    string? WebDavUrl = null,
+    string? WebDavUser = null)
 {
     public string DisplayName => Provider switch
     {
@@ -295,9 +308,11 @@ public record CloudConfig(string Provider, string? TokenPath, string? SyncPath)
         "onedrive" => S.Get("Provider_OneDrive"),
         "folder" => S.Get("Provider_FolderNetworkDrive"),
         "local" => S.Get("Provider_LocalOnly"),
+        "webdav" => S.Get("CloudProvider_WebDAV"),
         _ => Provider
     };
 
     public bool IsFolder => Provider == "folder";
     public bool IsLocal => Provider == "local";
+    public bool IsWebDav => Provider == "webdav";
 }

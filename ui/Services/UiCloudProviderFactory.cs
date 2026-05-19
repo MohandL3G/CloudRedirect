@@ -1,3 +1,4 @@
+using System.Net.Http;
 using CloudRedirect.Services.Providers;
 
 namespace CloudRedirect.Services;
@@ -17,6 +18,7 @@ internal static class UiCloudProviderFactory
         {
             "gdrive"   => new CliUiCloudProvider("gdrive", log),
             "onedrive" => new CliUiCloudProvider("onedrive", log),
+            "webdav"   => new WebDavUiCloudProvider(new HttpClient(), log, config.TokenPath!),
             "folder"   => new FolderUiCloudProvider(log, config.SyncPath!),
             _          => null,
         };
