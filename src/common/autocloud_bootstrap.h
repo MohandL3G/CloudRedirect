@@ -2,6 +2,7 @@
 // AutoCloud bootstrap - imports pre-existing save files into cloud storage
 // on first launch per app.
 
+#include "app_state.h"
 #include <string>
 #include <cstdint>
 #include <unordered_map>
@@ -27,7 +28,8 @@ void InvalidateCache(uint32_t accountId, uint32_t appId);
 void ResetAttempted(uint32_t accountId, uint32_t appId);
 
 int RestoreBlobsToGameFolder(uint32_t accountId, uint32_t appId,
-                              const std::string& steamPath);
+                               const std::string& steamPath,
+                               const std::unordered_map<std::string, CloudStorage::FileEntry>* cloudFiles = nullptr);
 
 void Shutdown();
 

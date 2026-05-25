@@ -1,6 +1,7 @@
 #pragma once
 #include "cloud_provider_base.h"
 #include <optional>
+#include <unordered_map>
 
 // OneDrive provider.
 // Inherits shared OAuth2/WinHTTP infrastructure from CloudProviderBase.
@@ -65,4 +66,14 @@ private:
                        const uint8_t* data, size_t len, int64_t timestamp);
 
     bool DoOneDriveDelete(uint32_t accountId, uint32_t appId, const std::string& filename);
+
+    // Item path → OneDrive item ID cache. Populated on first lookup, invalidated on delete.
+    std::unordered_map<std::string, std::string> m_itemIdCache;
+    mutable std::mutex m_itemIdCacheMtx;
+
+    // Returns cached item ID, or fetches and caches. Empty on failure.
+    std::string GetOrFetchItemId(const std::string& itemPath);
+
+    // Remove itemPath from the item ID cache (call after successful delete).
+    void InvalidateItemId(const std::string& itemPath);
 };

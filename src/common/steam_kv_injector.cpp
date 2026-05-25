@@ -366,7 +366,7 @@ static constexpr uintptr_t FALLBACK_RVA_GET_SECTION     = 0xF47130;
 static constexpr uintptr_t FALLBACK_RVA_KV_FIND_KEY     = 0x24CEF30;
 static constexpr uintptr_t FALLBACK_RVA_KV_SET_UINT64   = 0x24CA040;
 static constexpr uintptr_t FALLBACK_RVA_KV_SET_INT32    = 0x24CA010;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_STRING   = 0x24CA070;
+static constexpr uintptr_t FALLBACK_RVA_KV_SET_STRING   = 0x24C9EB0;
 
 // Offset from CSteamEngine* to CAppInfoCache instance.
 static constexpr uintptr_t APPINFOCACHE_OFFSET = 2952; // 0xB88
@@ -658,11 +658,31 @@ bool Init() {
                 (unsigned long)globalEng, (unsigned long)(globalEng - base));
         }
 
-        // KvSetString: fixed offset from KvSetInt32 (0x60 in fallback RVAs).
-        uintptr_t kvSetStr = kvSetI32 ? (kvSetI32 + (FALLBACK_RVA_KV_SET_STRING - FALLBACK_RVA_KV_SET_INT32))
-                                      : 0;
+        // KvSetString: scan backward from KvSetInt32 for type=2 pattern, then find prologue.
+        uintptr_t kvSetStr = 0;
+        if (kvSetI32) {
+            const uint8_t kTyp2[] = { 0x83, 0xE0, 0xE1, 0x83, 0xC8, 0x02, 0x88, 0x46, 0x0B };
+            uintptr_t scanStart = (kvSetI32 > 0x400) ? kvSetI32 - 0x400 : ctx.textStart;
+            const uint8_t* mem = reinterpret_cast<const uint8_t*>(scanStart);
+            size_t scanLen = kvSetI32 - scanStart;
+            for (size_t i = 0; i + sizeof(kTyp2) <= scanLen; ++i) {
+                if (memcmp(mem + i, kTyp2, sizeof(kTyp2)) == 0) {
+                    uintptr_t matchAddr = scanStart + i;
+                    for (size_t back = 0x20; back < 0xB0; ++back) {
+                        uintptr_t candidate = matchAddr - back;
+                        const uint8_t* fb = reinterpret_cast<const uint8_t*>(candidate);
+                        if (fb[0] == 0x55 && fb[1] == 0x57 && fb[2] == 0x56 &&
+                            fb[3] == 0x53 && fb[4] == 0xE8) {
+                            kvSetStr = candidate;
+                            break;
+                        }
+                    }
+                    if (kvSetStr) break;
+                }
+            }
+        }
         if (kvSetStr) {
-            LOG("[KvInjector] SigScan: KvSetString at 0x%lx (base+0x%lx, derived from KvSetInt32)",
+            LOG("[KvInjector] SigScan: KvSetString at 0x%lx (base+0x%lx)",
                 (unsigned long)kvSetStr, (unsigned long)(kvSetStr - base));
         }
 

@@ -10,8 +10,7 @@
 namespace AutoCloudPathResolver {
 
 // For native Linux games, map Windows root tokens to XDG/Linux equivalents.
-// This handles games that have AutoCloud rules with Windows roots but
-// also have Linux platform support (platforms mask includes bit 8).
+// Resolve AutoCloud paths for games with Windows roots on Linux (platform bit 8).
 inline std::string WindowsRootToLinux(const std::string& windowsRoot) {
     std::string lower;
     for (char c : windowsRoot) lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

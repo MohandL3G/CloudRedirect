@@ -24,6 +24,7 @@ inline constexpr const char* RPC_TRANSFER_REPORT     = "Cloud.ExternalStorageTra
 
 // Steam EResult values used by the cloud RPC layer.
 inline constexpr int32_t kEResultOK       = 1;
+inline constexpr int32_t kEResultFail     = 2;
 inline constexpr int32_t kEResultDisabled = 108;
 
 // RPC response: body bytes + optional EResult override.
@@ -54,6 +55,9 @@ RpcResult HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBody
 
 void RestoreAppMetadata(uint32_t accountId, uint32_t appId);
 void ShutdownRpcHandlers();
+
+// Flush pending sync icon states to registry.vdf (Linux, called from OnUnload).
+void FlushPendingSyncStates();
 
 // True if the UserGameStats blob has any non-zero stat/achievement data.
 // Empty stubs and unparseable input return false.

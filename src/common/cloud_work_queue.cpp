@@ -37,7 +37,7 @@ static std::unordered_map<std::string, WorkItem> g_failedWorkItems;
 static std::condition_variable           g_drainCV;
 static constexpr int                     WORKER_THREAD_COUNT = 4;
 
-static constexpr int                     MAX_DRAIN_REQUEES = 3;
+static constexpr int                     MAX_DRAIN_REQUEUES = 3;
 static constexpr int                     FAIL_THRESHOLD     = 5;
 static constexpr auto                    RECENT_UPLOAD_TTL = std::chrono::seconds(120);
 
@@ -215,7 +215,7 @@ static void RequeueFailedWorkForPrefixLocked(const std::string& prefix) {
             ++it;
             continue;
         }
-        if (it->second.drainRequeues >= MAX_DRAIN_REQUEES) {
+        if (it->second.drainRequeues >= MAX_DRAIN_REQUEUES) {
             g_failedPaths.erase(it->first);
             it = g_failedWorkItems.erase(it);
             continue;
@@ -328,6 +328,9 @@ static void WorkerLoop(int threadId) {
         }
 
         std::string activePath = item.cloudPath;
+        // Capture before potential move (UB after move).
+        const bool itemBestEffort = item.bestEffort;
+        const auto itemType = item.type;
         bool success = false;
         bool uploadedBytes = false;
         bool requeued = false;
@@ -431,16 +434,17 @@ static void WorkerLoop(int threadId) {
             if (it != g_activePaths.end()) {
                 if (--it->second <= 0) g_activePaths.erase(it);
             }
-            if (item.bestEffort) ClearActiveBestEffortLocked(activePath);
-            if (item.type == WorkItem::Delete) ClearActiveDeleteLocked(activePath);
+            if (itemBestEffort) ClearActiveBestEffortLocked(activePath);
+            if (itemType == WorkItem::Delete) ClearActiveDeleteLocked(activePath);
             if (success) {
                 g_failedPaths.erase(activePath);
                 g_failedWorkItems.erase(activePath);
-                if (item.type == WorkItem::Upload && uploadedBytes) {
+                if (itemType == WorkItem::Upload && uploadedBytes) {
+                    // item.data valid (upload succeeded, no move).
                     g_recentUploadFingerprints[activePath] = {
                         FingerprintUpload(item.data), std::chrono::steady_clock::now()
                     };
-                } else if (item.type == WorkItem::Delete) {
+                } else if (itemType == WorkItem::Delete) {
                     g_recentUploadFingerprints.erase(activePath);
                 }
             } else if (droppedAsStale) {
@@ -678,8 +682,32 @@ void Shutdown() {
     g_workerRunning = false;
     g_queueCV.notify_all();
 
+    // 5s bounded wait for workers; detach stragglers blocked on cloud I/O.
+    auto joinDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (auto& t : g_workerThreads) {
-        if (t.joinable()) t.join();
+        if (!t.joinable()) continue;
+        auto remaining = joinDeadline - std::chrono::steady_clock::now();
+        if (remaining <= std::chrono::milliseconds(0)) {
+            LOG("[CloudStorage] WorkQueue shutdown: detaching worker (join deadline exceeded)");
+            t.detach();
+            continue;
+        }
+#ifdef _WIN32
+        DWORD waitMs = (DWORD)std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+        HANDLE h = t.native_handle();
+        if (WaitForSingleObject(h, waitMs) == WAIT_TIMEOUT) {
+            LOG("[CloudStorage] WorkQueue shutdown: detaching worker (join timed out after %lu ms)", waitMs);
+            t.detach();
+        } else {
+            t.join();
+        }
+#else
+        // No timed join on POSIX; best-effort sleep then join.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (t.joinable()) {
+            t.join();
+        }
+#endif
     }
     g_workerThreads.clear();
 

@@ -1,6 +1,7 @@
 #pragma once
 #include "cloud_provider_base.h"
 #include <unordered_map>
+#include <chrono>
 #include <optional>
 
 // Google Drive provider.
@@ -37,6 +38,7 @@ protected:
 private:
     // Google Drive folder/file ID cache
     std::unordered_map<std::string, std::string> m_folders;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_missingFolders; // negative cache with TTL
     std::unordered_map<std::string, std::string> m_files;
     std::recursive_mutex m_folderMtx;
     std::recursive_mutex m_folderCreateMtx;  // serializes find-or-create to prevent duplicate folders

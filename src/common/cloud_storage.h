@@ -29,9 +29,11 @@ bool StoreBlobStaged(uint32_t accountId, uint32_t appId, uint64_t batchId,
 
 // Cloud-first when active; returns empty if not found.
 // Sets *found=true if the blob exists (even if 0 bytes).
+// expectedShaHex: cloud SHA; skip network if local cache matches.
 std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
-                                  const std::string& filename,
-                                  bool* found = nullptr);
+                                   const std::string& filename,
+                                   bool* found = nullptr,
+                                   const std::string& expectedShaHex = {});
 
 bool DeleteBlob(uint32_t accountId, uint32_t appId,
                 const std::string& filename);
@@ -59,8 +61,6 @@ bool HasLocalBlob(uint32_t accountId, uint32_t appId,
 
 // GC: delete unreferenced blobs. Returns count deleted, or -1 on error.
 int GarbageCollectBlobs(uint32_t accountId, uint32_t appId);
-
-// ============================================================================
 
 // Returns 0 if in sync or error; >0 = cloud CN when cloud is newer.
 uint64_t FetchCloudCN(uint32_t accountId, uint32_t appId);

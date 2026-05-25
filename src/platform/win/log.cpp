@@ -95,14 +95,7 @@ void Write(const char* fmt, ...) {
     RotateIfNeeded();
     if (!g_file) return; // rotation may have failed
 
-    // Build the entire record (timestamp + caller's formatted line + '\n')
-    // into a single buffer, then emit with one fwrite. Previously we issued
-    // four separate fprintf calls - each one a distinct write to the FILE*
-    // buffer - so two threads logging concurrently could interleave their
-    // fragments inside the kernel buffer. The mutex above prevents that
-    // here, but the single-write design also matches what a future async /
-    // lock-free log queue would require, and removes the dependency on
-    // _IOLBF buffering semantics.
+    // Build the full record into one buffer and emit with a single fwrite.
     char stack[STACK_BUF];
     char* buf = stack;
     size_t cap = sizeof(stack);

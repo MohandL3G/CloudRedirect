@@ -17,7 +17,7 @@ void Log::Init()
     char path[512];
     snprintf(path, sizeof(path), "%s/.config/CloudRedirect/cloud_redirect.log", home);
 
-    // Ensure directory exists
+    // Create directory if missing
     char dir[512];
     snprintf(dir, sizeof(dir), "%s/.config", home);
     mkdir(dir, 0755);

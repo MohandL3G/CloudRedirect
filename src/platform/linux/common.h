@@ -11,4 +11,4 @@
 #include <filesystem>
 #include <fstream>
 
-// Note: kPathSep and kPathSepStr are now provided via Platform() in file_util.h
+// kPathSep and kPathSepStr are provided via Platform() in file_util.h

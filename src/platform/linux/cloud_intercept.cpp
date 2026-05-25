@@ -1,15 +1,18 @@
 #include "cloud_intercept.h"
 #include "log.h"
 #include "file_util.h"
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
 #include <fstream>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 #include <sstream>
 #include <pwd.h>
 #include <unistd.h>
+#include <sys/inotify.h>
 #include "yaml_parser.h"
 
 static std::string g_steamPath;
@@ -19,6 +22,7 @@ static std::mutex g_mutex;
 static std::unordered_set<uint32_t> g_namespaceApps;
 static std::mutex g_nsMutex;
 static std::atomic<bool> g_initDone{false};
+static std::atomic<int> g_watcherFd{-1};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -43,7 +47,41 @@ static std::string DetectSteamPath() {
 
 // ── Parse SLSsteam config.yaml ──────────────────────────────────────────
 
-static void LoadNamespaceAppsFromSLSsteam() {
+// Returns true and sets outPath if the file was read and DisableCloud == false.
+// Adds any newly-seen appIds to g_namespaceApps. Existing entries are never removed.
+static bool LoadNamespaceAppsFrom(const std::string& configPath, int* outAdded) {
+    auto yaml = ParseYamlFile(configPath);
+    if (yaml.empty()) return false;
+
+    auto dcIt = yaml.find("DisableCloud");
+    if (dcIt == yaml.end() || !dcIt->second.isBool || dcIt->second.boolVal) {
+        LOG("[Linux] DisableCloud enabled/missing - cloud saves blocked by SLSsteam");
+        return false;
+    }
+
+    auto appsIt = yaml.find("AdditionalApps");
+    if (appsIt == yaml.end() || !appsIt->second.isList || appsIt->second.list.empty()) {
+        return true;
+    }
+
+    int added = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_nsMutex);
+        for (const auto& appStr : appsIt->second.list) {
+            char* endp = nullptr;
+            unsigned long val = strtoul(appStr.c_str(), &endp, 10);
+            if (endp != appStr.c_str() && val > 0 && val <= 0xFFFFFFFF) {
+                if (g_namespaceApps.insert((uint32_t)val).second) {
+                    ++added;
+                }
+            }
+        }
+    }
+    if (outAdded) *outAdded = added;
+    return true;
+}
+
+static std::string LoadNamespaceAppsFromSLSsteam() {
     std::string home = GetHome();
 
     std::vector<std::string> configPaths = {
@@ -52,43 +90,53 @@ static void LoadNamespaceAppsFromSLSsteam() {
     };
 
     for (const auto& configPath : configPaths) {
-        auto yaml = ParseYamlFile(configPath);
-        if (yaml.empty()) continue;
-
+        int added = 0;
+        if (!LoadNamespaceAppsFrom(configPath, &added)) continue;
         LOG("[Linux] Reading SLSsteam config: %s", configPath.c_str());
-
-        auto dcIt = yaml.find("DisableCloud");
-        if (dcIt == yaml.end() || !dcIt->second.isBool || dcIt->second.boolVal) {
-            LOG("[Linux] DisableCloud enabled/missing - cloud saves blocked by SLSsteam");
-            return;
-        }
-
-        auto appsIt = yaml.find("AdditionalApps");
-        if (appsIt == yaml.end() || !appsIt->second.isList || appsIt->second.list.empty()) {
-            LOG("[Linux] DisableCloud: no but no AdditionalApps configured");
-            return;
-        }
-
-        int appCount = 0;
-        for (const auto& appStr : appsIt->second.list) {
-            char* endp = nullptr;
-            unsigned long val = strtoul(appStr.c_str(), &endp, 10);
-            if (endp != appStr.c_str() && val > 0 && val <= 0xFFFFFFFF) {
-                std::lock_guard<std::mutex> lock(g_nsMutex);
-                g_namespaceApps.insert((uint32_t)val);
-                appCount++;
-            }
-        }
-
-        if (appCount > 0) {
-            LOG("[Linux] Loaded %d apps from AdditionalApps", appCount);
+        if (added > 0) {
+            LOG("[Linux] Loaded %d apps from AdditionalApps", added);
         } else {
             LOG("[Linux] DisableCloud: no but no AdditionalApps configured");
         }
-        return;
+        return configPath;
     }
 
     LOG("[Linux] No SLSsteam config found");
+    return {};
+}
+
+// Watch SLSsteam config for changes; re-read AdditionalApps on modify.
+static void WatchSLSsteamConfig(std::string configPath) {
+    int notifyFd = inotify_init();
+    if (notifyFd == -1) {
+        LOG("[Linux] inotify_init failed: %s", strerror(errno));
+        return;
+    }
+    int wd = inotify_add_watch(notifyFd, configPath.c_str(), IN_MODIFY);
+    if (wd == -1) {
+        LOG("[Linux] inotify_add_watch %s failed: %s", configPath.c_str(), strerror(errno));
+        close(notifyFd);
+        return;
+    }
+    g_watcherFd.store(notifyFd, std::memory_order_release);
+    LOG("[Linux] Watching SLSsteam config for changes: %s", configPath.c_str());
+
+    for (;;) {
+        inotify_event event{};
+        ssize_t n = read(notifyFd, &event, sizeof(event));
+        if (n <= 0) {
+            if (n == -1 && errno == EINTR) continue;
+            break;
+        }
+        int added = 0;
+        if (LoadNamespaceAppsFrom(configPath, &added) && added > 0) {
+            LOG("[Linux] SLSsteam config change: registered %d new namespace app(s)", added);
+        }
+    }
+
+    inotify_rm_watch(notifyFd, wd);
+    close(notifyFd);
+    g_watcherFd.store(-1, std::memory_order_release);
 }
 
 // ── Parse loginusers.vdf for account ID ─────────────────────────────────
@@ -195,8 +243,11 @@ void InitLinux() {
         g_accountId.store(accountId, std::memory_order_release);
     }
 
-    // Load namespace apps from SLSsteam config
-    LoadNamespaceAppsFromSLSsteam();
+    // Load namespace apps from SLSsteam config and watch for changes.
+    std::string watchedPath = LoadNamespaceAppsFromSLSsteam();
+    if (!watchedPath.empty()) {
+        std::thread(WatchSLSsteamConfig, watchedPath).detach();
+    }
 }
 
 bool IsNamespaceApp(uint32_t appId) {
@@ -244,6 +295,8 @@ void RecordLaunchTime(uint32_t /*appId*/) {
 }
 
 void Shutdown() {
+    int fd = g_watcherFd.exchange(-1, std::memory_order_acq_rel);
+    if (fd != -1) close(fd);
     LOG("[Linux] CloudIntercept shutdown");
 }
 

@@ -40,7 +40,7 @@ bool IsAppInstalled(const std::string& steamPath, uint32_t appId);
 
 // Parse AutoCloud savefiles rules from appinfo.vdf for KV injection.
 std::vector<AutoCloudUtil::AutoCloudRuleNative> GetRules(
-    const std::string& steamPath, uint32_t appId);
+    const std::string& steamPath, uint32_t appId, uint32_t accountId = 0);
 
 // Get raw rootoverrides for an app from appinfo.vdf.
 // Returns empty vector if app has no rootoverrides or appinfo can't be parsed.

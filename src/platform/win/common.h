@@ -12,4 +12,4 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
-// Note: kPathSep and kPathSepStr are now provided via Platform() in file_util.h
+// kPathSep and kPathSepStr are provided via Platform() in file_util.h

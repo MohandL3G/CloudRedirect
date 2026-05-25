@@ -14,6 +14,7 @@ const char* CR_GetVersion() { return CR_VERSION_STRING; }
 #include "http_server.h"
 #include "legacy_metadata_cleanup.h"
 #include "log.h"
+#include "rpc_handlers.h"
 #include "steam_kv_injector.h"
 
 #include <dlfcn.h>
@@ -194,6 +195,17 @@ static void DoInit()
         return;
     }
 
+    // Validate slot pointers are within steamclient's address range
+    for (int slot : {5, 7, 8}) {
+        uintptr_t fn = reinterpret_cast<uintptr_t>(vtable[slot]);
+        if (fn < steamBase || fn >= steamBase + steamSize) {
+            DebugLog("[CR] DoInit: FAILED - vtable slot points outside steamclient\n");
+            Log::Error("Init failed: slot %d (%p) outside steamclient range, incompatible client", slot, (void*)fn);
+            Notify("Incompatible Steam client -- hooks disabled", true);
+            return;
+        }
+    }
+
     DebugLog("[CR] DoInit: saving originals\n");
     CloudHooks::SetOriginals(vtable[5], vtable[7], vtable[8]);
 
@@ -244,7 +256,7 @@ static void ScanCrashHandler(int sig)
     raise(sig);
 }
 
-// ── Post-init crash handler: dumps backtrace to log ─────────────────────
+// Post-init crash handler: dumps backtrace to log
 static volatile sig_atomic_t g_inCrashHandler = 0;
 
 static char* AppendLiteral(char* out, char* end, const char* s)
@@ -372,10 +384,12 @@ static void* DeferredInitThread(void*)
     // Poll for steamclient.so -- under LD_PRELOAD we load before Steam has
     // mapped steamclient, so a fixed delay is insufficient.
     DebugLog("[CR] DeferredInit: waiting for steamclient.so\n");
-    for (int i = 0; i < 240; i++) {  // up to 120 seconds
+    for (int i = 0; i < 120; i++) {  // up to 60 seconds
         if (SteamclientMapped()) break;
         usleep(500000);
     }
+    // Extra settle time for relocations to complete
+    usleep(1000000);
     DebugLog("[CR] DeferredInit: starting\n");
 
     // Install crash guard so a bad memory read aborts correctly
@@ -447,6 +461,9 @@ static void OnUnload()
             pthread_join(g_initThread, nullptr);
         }
     }
+
+    // Flush sync icon states to registry.vdf.
+    CloudIntercept::FlushPendingSyncStates();
 
     // Shut down cloud storage (signals workers, drains queue with timeout)
     CloudStorage::Shutdown();

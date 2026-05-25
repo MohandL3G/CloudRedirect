@@ -34,12 +34,7 @@ std::string_view GetString(const std::vector<Field>& fields, uint32_t fieldNum);
 
 class Writer {
 public:
-    // NOTE: When emitting a Steam UFS field that the reverse engineered descriptor
-    // declares as `optional uint32` (e.g. raw_file_size, file_size,
-    // existing_files), route the value through ClampFileSizeToUint32 in
-    // rpc_handlers.cpp instead of passing a raw uint64. Steam's parser
-    // narrows on read and silently truncates mod 2^32; the helper logs
-    // and clamps so a bad value pinpoints the offending field/file.
+    // For uint32 UFS fields, use ClampFileSizeToUint32 (Steam truncates mod 2^32).
     void WriteVarint(uint32_t fieldNum, uint64_t value);
     void WriteFixed64(uint32_t fieldNum, uint64_t value);
     void WriteBytes(uint32_t fieldNum, const uint8_t* data, size_t len);

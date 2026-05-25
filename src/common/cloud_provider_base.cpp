@@ -151,6 +151,7 @@ std::string CloudProviderBase::GetAccessToken() {
     if (TokenValid()) return m_tok.access;
     if (m_tok.refresh.empty()) {
         LOG("%s GetAccessToken: no refresh token", LogTag());
+        if (m_authFailureCb) m_authFailureCb(AuthFailureName());
         return {};
     }
 

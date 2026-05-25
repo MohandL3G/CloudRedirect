@@ -61,6 +61,35 @@ static Manifest PruneManifestToRemoteBlobListing(
 static ICloudProvider*                     g_manifestProvider = nullptr;
 static std::string                        g_manifestLocalRoot;
 
+// In-memory manifest cache.
+struct CachedManifest {
+    Manifest manifest;
+    bool valid = false;
+};
+static std::mutex g_manifestCacheMutex;
+static std::unordered_map<uint64_t, CachedManifest> g_manifestCache;
+
+static uint64_t ManifestCacheKey(uint32_t accountId, uint32_t appId) {
+    return (static_cast<uint64_t>(accountId) << 32) | appId;
+}
+
+static bool TryGetCachedManifest(uint32_t accountId, uint32_t appId, Manifest& out) {
+    std::lock_guard<std::mutex> lock(g_manifestCacheMutex);
+    auto it = g_manifestCache.find(ManifestCacheKey(accountId, appId));
+    if (it != g_manifestCache.end() && it->second.valid) {
+        out = it->second.manifest;
+        return true;
+    }
+    return false;
+}
+
+static void SetCachedManifest(uint32_t accountId, uint32_t appId, const Manifest& manifest) {
+    std::lock_guard<std::mutex> lock(g_manifestCacheMutex);
+    auto& entry = g_manifestCache[ManifestCacheKey(accountId, appId)];
+    entry.manifest = manifest;
+    entry.valid = true;
+}
+
 // --- local helpers ---
 
 static std::string ManifestLocalPath(uint32_t accountId, uint32_t appId) {
@@ -174,6 +203,7 @@ static bool SaveManifestImpl(uint32_t accountId, uint32_t appId,
         LOG("[ManifestStore] %s app %u: failed to write local manifest", opName, appId);
         return false;
     }
+    SetCachedManifest(accountId, appId, cleanedManifest);
 
     if (g_manifestProvider && g_manifestProvider->IsAuthenticated()) {
         if (uploadMode == ManifestUploadMode::Sync) {
@@ -207,6 +237,10 @@ static bool SaveManifestImpl(uint32_t accountId, uint32_t appId,
 void ManifestStore_Init(const std::string& localRoot, ICloudProvider* provider) {
     g_manifestLocalRoot = localRoot;
     g_manifestProvider = provider;
+    {
+        std::lock_guard<std::mutex> lock(g_manifestCacheMutex);
+        g_manifestCache.clear();
+    }
     LOG("[ManifestStore] Initialized at %s", localRoot.c_str());
 }
 
@@ -356,6 +390,8 @@ Manifest LoadLocalManifest(uint32_t accountId, uint32_t appId) {
 }
 
 bool TryLoadLocalManifest(uint32_t accountId, uint32_t appId, Manifest& outManifest) {
+    if (TryGetCachedManifest(accountId, appId, outManifest)) return true;
+
     outManifest.clear();
     std::string localPath = ManifestLocalPath(accountId, appId);
     std::ifstream in(FileUtil::Utf8ToPath(localPath), std::ios::binary);
@@ -376,6 +412,7 @@ bool TryLoadLocalManifest(uint32_t accountId, uint32_t appId, Manifest& outManif
     in.close();
 
     outManifest = ParseManifestJson(json);
+    SetCachedManifest(accountId, appId, outManifest);
     LOG("[ManifestStore] LoadLocalManifest app %u: loaded %zu files", appId, outManifest.size());
     return true;
 }

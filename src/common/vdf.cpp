@@ -2,12 +2,7 @@
 
 namespace VdfUtil {
 
-// Strip a single trailing '\r' from a line-slice so downstream literal
-// comparisons (e.g. trimmed == "{") don't spuriously fail on CRLF input. Our
-// ifstream reads use text mode which would normally translate CRLF->LF, but
-// callers of the pure APIs (unit tests, in-memory fixtures, third-party
-// readers) may pass raw CRLF; tolerating it here keeps the parser contract
-// uniform.
+// Strip trailing '\r' so literal comparisons work on both CRLF and LF input.
 static std::string_view StripCR(std::string_view s) {
     if (!s.empty() && s.back() == '\r') s.remove_suffix(1);
     return s;
@@ -83,19 +78,13 @@ bool FindVdfSectionRange(const std::string& vdfContent,
     for (size_t i = 0; i < pathLen; ++i) {
         const std::string needle = std::string("\"") + sectionPath[i] + "\"";
 
-        // Anchored header search: require the needle to start at column 0 or
-        // immediately after a line-ending byte. Without this, a value like
-        // "version" "1583520" earlier in the file could spuriously match the
-        // "1583520" section header, shifting sectionStart/sectionEnd onto an
-        // unrelated brace pair.
+        // Line-anchored search: skip mid-value matches (e.g. "version" "1583520").
         size_t namePos = std::string::npos;
         size_t scan = searchPos;
         while (scan < vdfContent.size()) {
             size_t hit = vdfContent.find(needle, scan);
             if (hit == std::string::npos) break;
-            // Accept needle at column 0 or preceded only by whitespace on its line.
-            // This rejects mid-value matches (e.g., "version" "1583520" matching
-            // "1583520" as a section header) while allowing tab-indented headers.
+            // Accept only at column 0 or preceded by whitespace on the same line.
             if (hit == 0) {
                 namePos = hit;
                 break;

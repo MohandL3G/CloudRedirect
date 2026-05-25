@@ -140,9 +140,7 @@ static void SetRpcCrashContext(const char* phase, const char* method, uint32_t a
 #endif
 }
 
-// ============================================================================
 // Shutdown
-// ============================================================================
 
 void ShutdownRpcHandlers() {
     AutoCloudBootstrap::Shutdown();
@@ -213,6 +211,120 @@ static std::mutex g_batchCanonicalTokensMutex;
 // Serializes token load-merge-save cycles.
 static std::mutex g_tokenCaptureMutex;
 
+// Forward declaration for Linux SetCloudSyncState.
+static bool EnsureVdfSectionPath(std::string& vdfContent,
+                                  const char* const* sections,
+                                  size_t sectionCount);
+
+#ifdef _WIN32
+// Write cloud sync icon state to the registry key Steam reads at startup.
+static void SetCloudSyncState(uint32_t appId, const char* state) {
+    char subkey[128];
+    snprintf(subkey, sizeof(subkey),
+             "Software\\Valve\\Steam\\Apps\\%u\\cloud", appId);
+    HKEY hk = nullptr;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, subkey, 0, nullptr,
+                        0, KEY_SET_VALUE, nullptr, &hk, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExA(hk, "last_sync_state", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(state),
+                       static_cast<DWORD>(strlen(state) + 1));
+        RegCloseKey(hk);
+    }
+}
+void FlushPendingSyncStates() {} // Windows registry writes are immediate
+#else
+// Write cloud sync icon state to registry.vdf (Linux).
+static std::mutex g_registryVdfMutex;
+static std::unordered_map<uint32_t, std::string> g_pendingSyncStates;
+
+// Applies all entries from |states| into registry.vdf atomically.
+// Caller must hold g_registryVdfMutex.
+static void WriteRegistryVdfSyncStates(
+        const std::string& vdfPath,
+        const std::unordered_map<uint32_t, std::string>& states) {
+    if (states.empty()) return;
+
+    std::string vdfContent;
+    {
+        std::ifstream f(vdfPath);
+        if (!f) return;
+        vdfContent = std::string(std::istreambuf_iterator<char>(f), {});
+    }
+    if (vdfContent.empty()) return;
+
+    for (auto& [appId, state] : states) {
+        std::string appIdStr = std::to_string(appId);
+        const char* sections[] = {
+            "Registry", "HKCU", "Software", "Valve", "Steam", "Apps",
+            appIdStr.c_str(), "cloud"
+        };
+        constexpr size_t kSectionCount = 8;
+
+        bool updated = false;
+        VdfUtil::ForEachFieldInSection(vdfContent, sections, kSectionCount,
+            [&](const VdfUtil::FieldInfo& fi) -> bool {
+                if (fi.key == "last_sync_state") {
+                    vdfContent.replace(fi.valStart, fi.valEnd - fi.valStart, state);
+                    updated = true;
+                    return false;
+                }
+                return true;
+            });
+
+        if (!updated) {
+            if (!EnsureVdfSectionPath(vdfContent, sections, kSectionCount))
+                continue;
+            size_t sectionStart = 0, sectionEnd = 0;
+            if (!VdfUtil::FindVdfSectionRange(vdfContent, sections, kSectionCount,
+                                              sectionStart, sectionEnd))
+                continue;
+            std::string indent = "\t\t\t\t\t\t\t\t\t";
+            size_t lineStart = vdfContent.rfind('\n', sectionEnd);
+            if (lineStart != std::string::npos) {
+                ++lineStart;
+                size_t indentEnd = lineStart;
+                while (indentEnd < vdfContent.size() &&
+                       (vdfContent[indentEnd] == '\t' || vdfContent[indentEnd] == ' '))
+                    ++indentEnd;
+                indent.assign(vdfContent.data() + lineStart, indentEnd - lineStart);
+                indent.push_back('\t');
+            }
+            std::string insertion = indent + "\"last_sync_state\"\t\t\"" + state + "\"\n";
+            vdfContent.insert(sectionEnd, insertion);
+        }
+    }
+
+    FileUtil::AtomicWriteText(vdfPath, vdfContent);
+}
+
+static void SetCloudSyncState(uint32_t appId, const char* state) {
+    std::string steamPath = GetSteamPath();
+    if (steamPath.empty()) return;
+
+    std::string vdfPath = steamPath + "registry.vdf";
+    std::lock_guard<std::mutex> lock(g_registryVdfMutex);
+
+    g_pendingSyncStates[appId] = state;
+
+    std::unordered_map<uint32_t, std::string> single{{appId, state}};
+    WriteRegistryVdfSyncStates(vdfPath, single);
+}
+
+// Flush all tracked sync states to registry.vdf (called from OnUnload).
+void FlushPendingSyncStates() {
+    std::string steamPath = GetSteamPath();
+    if (steamPath.empty()) return;
+
+    std::string vdfPath = steamPath + "registry.vdf";
+    std::lock_guard<std::mutex> lock(g_registryVdfMutex);
+
+    if (g_pendingSyncStates.empty()) return;
+    LOG("[SyncState] Flushing %zu pending sync states to registry.vdf",
+        g_pendingSyncStates.size());
+    WriteRegistryVdfSyncStates(vdfPath, g_pendingSyncStates);
+}
+#endif
+
 // Namespace apps may lack PICS data (ufs.quota/maxnumfiles default to 0,
 // causing over-quota eviction). Inject cached PICS values or fallback.
 static constexpr uint64_t kFallbackQuotaBytes = 1073741824ULL; // 1 GB
@@ -229,7 +341,7 @@ static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
     uint32_t existingFiles = 0;
     bool readOk = SteamKvInjector::ReadAppQuota(appId, existingQuota, existingFiles);
 
-    if (readOk && existingQuota > 0 && existingFiles > 0) {
+        if (readOk && existingQuota > 0 && existingFiles > 0) {
         if (cloudState &&
             (cloudState->quota.quotaBytes != existingQuota ||
              cloudState->quota.maxNumFiles != existingFiles)) {
@@ -237,14 +349,9 @@ static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
             cloudState->quota.maxNumFiles = existingFiles;
             cloudState->quota.fetchedAtUnix = static_cast<uint64_t>(time(nullptr));
             cloudState->quota.lastSeenBuildId = cloudState->appBuildId;
-            LOG("[NS] EnsureAppQuotaInjected app=%u: caching PICS quota=%llu files=%u",
+            LOG("[NS] EnsureAppQuotaInjected app=%u: caching PICS quota=%llu files=%u (publish deferred to next batch)",
                 appId, (unsigned long long)existingQuota, existingFiles);
-            auto stateCopy = std::make_shared<CloudStorage::CloudAppState>(*cloudState);
-            uint32_t asyncAcct = accountId;
-            uint32_t asyncApp = appId;
-            std::thread([stateCopy, asyncAcct, asyncApp] {
-                CloudStorage::PublishCloudState(asyncAcct, asyncApp, *stateCopy);
-            }).detach();
+            // Quota persisted on next CompleteBatch; async publish risks overwriting newer state.
         }
         LOG("[NS] EnsureAppQuotaInjected app=%u: Steam has quota=%llu files=%u",
             appId, (unsigned long long)existingQuota, existingFiles);
@@ -270,10 +377,22 @@ static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
     return SteamKvInjector::InjectAppQuota(appId, injectQuota, injectFiles);
 }
 
-// Track apps that received a full manifest this session. Subsequent calls
-// return empty delta to avoid stale SHA/timestamp conflicts on AC Exit.
-static std::unordered_set<uint32_t> g_fullManifestSentApps;
+// Track (account, app) pairs that received a full manifest this session.
+static std::unordered_set<uint64_t> g_fullManifestSentApps;
 static std::mutex g_fullManifestSentMutex;
+
+// Per-(account, app) cached CN and buildId for the fast repeat-call path.
+static std::unordered_map<uint64_t, uint64_t> g_cachedCloudCN;
+static std::unordered_map<uint64_t, uint64_t> g_cachedAppBuildIdHwm;
+
+static uint64_t GetCachedCloudCN(uint32_t accountId, uint32_t appId) {
+    auto it = g_cachedCloudCN.find(MakeAppAccountKey(accountId, appId));
+    return (it != g_cachedCloudCN.end()) ? it->second : 0;
+}
+static uint64_t GetCachedAppBuildIdHwm(uint32_t accountId, uint32_t appId) {
+    auto it = g_cachedAppBuildIdHwm.find(MakeAppAccountKey(accountId, appId));
+    return (it != g_cachedAppBuildIdHwm.end()) ? it->second : 0;
+}
 
 // Inject savefiles rules so AC exit-sync builds a valid file-root tree.
 // Without this, namespace apps get all files deleted ("no longer matches patterns").
@@ -549,6 +668,12 @@ static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
         std::lock_guard<std::mutex> lock(g_remotecacheRepairMutex);
         g_remotecachePlantedRows.erase(key);
     }
+    {
+        std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+        g_fullManifestSentApps.erase(key);
+        g_cachedCloudCN.erase(key);
+        g_cachedAppBuildIdHwm.erase(key);
+    }
     
     // Invalidate bootstrap module's cache (also resets attempted flag)
     AutoCloudBootstrap::InvalidateCache(accountId, appId);
@@ -737,14 +862,6 @@ static bool EnsureAndMarkRemotecacheRepaired(
     if (ec || sizeAfter != sizeBefore || mtimeAfter != mtimeBefore) {
         LOG("[NS-RC] remotecache.vdf changed under us for app %u (%s); deferring repair",
             appId, vdfPath.c_str());
-        return false;
-    }
-
-    auto sizePreWrite = std::filesystem::file_size(pathW, ec);
-    auto mtimePreWrite = ec ? std::filesystem::file_time_type{}
-                            : std::filesystem::last_write_time(pathW, ec);
-    if (ec || sizePreWrite != sizeBefore || mtimePreWrite != mtimeBefore) {
-        LOG("[NS-RC] remotecache.vdf changed during repair for app %u, aborting", appId);
         return false;
     }
 
@@ -1038,6 +1155,59 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     }
     uint64_t appKey = MakeAppAccountKey(accountId, appId);
 
+    // Inject quota before ComputeLastKnownSyncState can run.
+    EnsureAppQuotaInjected(accountId, appId, nullptr);
+    EnsureSaveFilesInjected(appId);
+
+    // Fast path: probe CN if full manifest already sent this session.
+    {
+        const uint64_t cacheKey = MakeAppAccountKey(accountId, appId);
+        bool repeatCall = false;
+        uint64_t cachedCN = 0;
+        uint64_t cachedBuildId = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+            if (g_fullManifestSentApps.count(cacheKey) > 0) {
+                repeatCall = true;
+                cachedCN = GetCachedCloudCN(accountId, appId);
+                cachedBuildId = GetCachedAppBuildIdHwm(accountId, appId);
+            }
+        }
+        if (repeatCall) {
+            // CN probe; on change, invalidate cache and fall through to full fetch.
+            bool probeNeeded = CloudStorage::IsCloudActive() && cachedCN > 0;
+            uint64_t remoteCN = probeNeeded
+                ? CloudStorage::FetchCloudCN(accountId, appId) : cachedCN;
+            if (probeNeeded && remoteCN == 0) {
+                // Probe failed; invalidate cache and fall through to full fetch.
+                LOG("[NS-CL] GetAppFileChangelist app=%u: CN probe failed, invalidating cache",
+                    appId);
+                std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+                g_fullManifestSentApps.erase(cacheKey);
+                g_cachedCloudCN.erase(cacheKey);
+                g_cachedAppBuildIdHwm.erase(cacheKey);
+                // Fall through to full fetch below
+            } else if (remoteCN != cachedCN) {
+                LOG("[NS-CL] GetAppFileChangelist app=%u: remote CN=%llu differs from cached CN=%llu, invalidating cache",
+                    appId, remoteCN, cachedCN);
+                std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+                g_fullManifestSentApps.erase(cacheKey);
+                g_cachedCloudCN.erase(cacheKey);
+                g_cachedAppBuildIdHwm.erase(cacheKey);
+                // Fall through to full fetch below
+            } else {
+                LOG("[NS-CL] GetAppFileChangelist app=%u: repeat call, CN unchanged (%llu), returning cached empty delta",
+                    appId, cachedCN);
+                PB::Writer body;
+                body.WriteVarint(1, cachedCN);
+                body.WriteVarint(3, 1); // is_only_delta = 1
+                body.WriteString(5, GetMachineName());
+                body.WriteVarint(6, cachedBuildId);
+                return body;
+            }
+        }
+    }
+
     // Track whether we fetched fresh manifest from cloud this call
     CloudStorage::Manifest cloudManifest;
     std::unordered_map<std::string, CloudStorage::FileEntry> cloudFileEntries; // full per-file state from cloud
@@ -1089,9 +1259,6 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     EnsureAppQuotaInjected(accountId, appId,
                            haveFetchedState ? &fetchedState : nullptr);
 
-    // Inject savefiles rules for namespace apps missing PICS data.
-    EnsureSaveFilesInjected(appId);
-
     if (!haveCloudManifest) {
         SetRpcCrashContext("GetChangelist:local-fallback", "Cloud.GetAppFileChangelist#1", appId);
         uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
@@ -1141,6 +1308,17 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
                 uint32_t asyncAcct = accountId;
                 uint32_t asyncApp = appId;
                 std::thread([statePtr, asyncAcct, asyncApp] {
+                    // Acquire sync mutex to avoid racing with CompleteBatch.
+                    auto syncMtx = CloudStorage::AcquireAppSyncMutex(asyncAcct, asyncApp);
+                    std::lock_guard<std::mutex> lock(*syncMtx);
+                    // Abort if a CompleteBatch already published a newer CN.
+                    auto existing = CloudStorage::FetchCloudState(asyncAcct, asyncApp);
+                    if (existing.status == CloudStorage::StateFetchStatus::Ok &&
+                        existing.state.cn >= statePtr->cn) {
+                        LOG("[NS-CL] Bootstrap publish aborted for app %u: cloud CN %llu >= bootstrap CN %llu",
+                            asyncApp, existing.state.cn, statePtr->cn);
+                        return;
+                    }
                     CloudStorage::PublishCloudState(asyncAcct, asyncApp, *statePtr);
                 }).detach();
             }
@@ -1183,10 +1361,11 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
         } else {
             // No delta. First call: full manifest (populates root tokens).
             // Subsequent calls: empty delta (avoids stale SHA/timestamp conflicts).
+            const uint64_t cacheKey = MakeAppAccountKey(accountId, appId);
             bool alreadySentFull;
             {
                 std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
-                alreadySentFull = g_fullManifestSentApps.count(appId) > 0;
+                alreadySentFull = g_fullManifestSentApps.count(cacheKey) > 0;
             }
 
             serverChangeNumber = cloudCN;
@@ -1214,7 +1393,9 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
 
                 {
                     std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
-                    g_fullManifestSentApps.insert(appId);
+                    g_fullManifestSentApps.insert(cacheKey);
+                    g_cachedCloudCN[cacheKey] = cloudCN;
+                    g_cachedAppBuildIdHwm[cacheKey] = appBuildIdHwm;
                 }
                 LOG("[NS-CL] GetAppFileChangelist app=%u: returning full manifest (%zu files) at CN=%llu (clientCN=%llu)",
                     appId, files.size(), cloudCN, clientChangeNumber);
@@ -1245,12 +1426,25 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     LOG("[NS-CL] GetAppFileChangelist app=%u clientCN=%llu serverCN=%llu files=%zu",
         appId, clientChangeNumber, serverChangeNumber, files.size());
 
+    // Cache result so repeat calls (CM reconnects) skip cloud I/O entirely.
+    // Don't cache placeholder bootstrap response (CN==0, empty files).
+    if (serverChangeNumber > 0 || !files.empty()) {
+        const uint64_t cacheKey = MakeAppAccountKey(accountId, appId);
+        std::lock_guard<std::mutex> lock(g_fullManifestSentMutex);
+        if (g_fullManifestSentApps.count(cacheKey) == 0) {
+            g_fullManifestSentApps.insert(cacheKey);
+            g_cachedCloudCN[cacheKey] = serverChangeNumber;
+            g_cachedAppBuildIdHwm[cacheKey] = appBuildIdHwm;
+        }
+    }
+
     // build path_prefix table and file entries
     std::unordered_map<std::string, uint32_t> prefixMap;
     std::vector<std::string> prefixList;
     std::string machineName = GetMachineName();
 
     std::unordered_set<std::string> rootTokens;
+    bool appHasUfsRules = true; // assume yes until proven otherwise
     {
         SetRpcCrashContext("GetChangelist:root-token-cache", "Cloud.GetAppFileChangelist#1", appId);
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
@@ -1259,16 +1453,15 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
             rootTokens = it->second;
         }
     }
-    // Disk fallback; skip cache-write if worker straddles the read.
+    // Disk-only fallback (no cloud download yet); skip cache-write if worker straddles the read.
     if (rootTokens.empty()) {
         SetRpcCrashContext("GetChangelist:root-token-disk", "Cloud.GetAppFileChangelist#1", appId);
         bool bootstrapActiveBefore = AutoCloudBootstrap::IsActive(accountId, appId);
-        rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
+        rootTokens = LocalMetadataStore::LoadRootTokens(accountId, appId);
         bool bootstrapActiveAfter = AutoCloudBootstrap::IsActive(accountId, appId);
         bool bootstrapTouchedLoad = bootstrapActiveBefore || bootstrapActiveAfter;
         if (!rootTokens.empty() && !bootstrapTouchedLoad) {
             std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-            // Prefer in-memory if another caller populated it during I/O.
             auto it = g_appRootTokens.find(appKey);
             if (it != g_appRootTokens.end()) {
                 rootTokens = it->second;
@@ -1280,14 +1473,19 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
                 "-- bootstrap worker was active during disk read", accountId, appId);
         }
     }
+    // No disk tokens: skip cloud download for apps with no UFS rules.
     if (rootTokens.empty()) {
         std::string steamPath = CloudIntercept::GetSteamPath();
         if (!steamPath.empty()) {
             auto scanResult = AutoCloudScan::GetFileList(steamPath, accountId, appId);
+            appHasUfsRules = scanResult.hasRules;
+            if (appHasUfsRules) {
+                // Has rules but no tokens on disk -- fall back to full cloud load.
+                rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
+            }
             for (const auto& fe : scanResult.files) {
                 if (!fe.rootToken.empty()) rootTokens.insert(fe.rootToken);
             }
-            // No files on disk -- fall back to rule-level root tokens
             if (rootTokens.empty()) {
                 rootTokens = std::move(scanResult.ruleRootTokens);
             }
@@ -1302,6 +1500,7 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     }
 
     // Snapshot file -> root-token map; same straddle gate as root tokens.
+    // No UFS rules: skip cloud download.
     std::unordered_map<std::string, std::string> fileTokenSnapshot;
     bool needsDiskLoad = false;
     {
@@ -1317,7 +1516,9 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     if (needsDiskLoad) {
         SetRpcCrashContext("GetChangelist:file-token-disk", "Cloud.GetAppFileChangelist#1", appId);
         bool bootstrapActiveBefore = AutoCloudBootstrap::IsActive(accountId, appId);
-        auto loaded = CloudStorage::LoadFileTokens(accountId, appId);
+        auto loaded = appHasUfsRules
+            ? CloudStorage::LoadFileTokens(accountId, appId)
+            : LocalMetadataStore::LoadFileTokens(accountId, appId);
         bool bootstrapActiveAfter = AutoCloudBootstrap::IsActive(accountId, appId);
         bool bootstrapTouchedLoad = bootstrapActiveBefore || bootstrapActiveAfter;
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
@@ -1448,6 +1649,9 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
 
     LOG("[NS-CL] Response: %zu files, %zu prefixes, CN=%llu",
         prepared.size(), prefixList.size(), serverChangeNumber);
+
+    if (!prepared.empty())
+        SetCloudSyncState(appId, "synchronized");
 
     if (DiagEnabledForApp(appId)) {
         LOG("[DIAG] GetAppFileChangelist resp app=%u CN=%llu is_only_delta=%d files=%zu prefixes=%zu",
@@ -1662,7 +1866,7 @@ static std::vector<BkvNode> MergeStats(
             }
             localData->intVal |= cloudData->intVal;
 
-            // Ensure local has an AchievementTimes section
+            // Create AchievementTimes section if missing
             if (!localAchTimes) {
                 localStat->children.push_back(BkvNode{BKV_SECTION, "AchievementTimes"});
                 localAchTimes = &localStat->children.back();
@@ -1816,7 +2020,7 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
 }
 
 // SignalAppLaunchIntent: return pending_remote_operations.
-// No cloud sync here; Steam fetches files on-demand via ClientFileDownload.
+// Also pre-restores cloud files to game folders so Steam's sync finds them on disk.
 RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBody) {
     LOG("[NS] SignalAppLaunchIntent app=%u", appId);
 
@@ -1829,6 +2033,29 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
     EnsureAppQuotaInjected(accountId, appId, nullptr);
     EnsureSaveFilesInjected(appId);
 
+    // Fetch cloud state (SHAs for cache-first restore + session management).
+    CloudStorage::StateFetchResult stateResult;
+    if (CloudStorage::IsCloudActive()) {
+        stateResult = CloudStorage::FetchCloudState(accountId, appId);
+    }
+
+    // Pre-restore files before sync direction selection (AC_Launch never set for CR apps).
+    {
+        std::string steamPath = CloudIntercept::GetSteamPath();
+        if (!steamPath.empty()) {
+            const auto* cloudFiles = (stateResult.status == CloudStorage::StateFetchStatus::Ok)
+                ? &stateResult.state.files : nullptr;
+            int restored = AutoCloudBootstrap::RestoreBlobsToGameFolder(
+                accountId, appId, steamPath, cloudFiles);
+            if (restored > 0) {
+                LOG("[NS] LaunchIntent app=%u: pre-restored %d file(s) to game folder",
+                    appId, restored);
+            }
+        }
+    }
+
+    SetCloudSyncState(appId, "synchronized");
+
     if (CloudStorage::IsCloudActive()) {
         uint32_t asyncAcct = accountId;
         uint32_t asyncApp = appId;
@@ -1836,7 +2063,7 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
             RestoreAppMetadata(asyncAcct, asyncApp);
         }).detach();
     }
-    
+
     // Launch intent should not block on per-file bootstrap existence checks.
     // GetAppFileChangelist already tolerates bootstrap running in the background.
     AutoCloudBootstrap::Bootstrap(accountId, appId, /*wait=*/false);
@@ -1855,65 +2082,83 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
         if (f.fieldNum == 6 && f.wireType == PB::Varint) currentSession.deviceType = static_cast<uint32_t>(f.varintVal);
     }
 
-    // Cloud session management -- sync already happened in HandleGetChangelist.
+    // Cloud session management -- reuse stateResult from above (already fetched).
     PB::Writer body;
     bool sessionConflict = false;
-    if (CloudStorage::IsCloudActive()) {
+    if (stateResult.status == CloudStorage::StateFetchStatus::Ok) {
         // Sync mutex: serialize state RMW to prevent interleaved publishes.
         auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
         std::lock_guard<std::mutex> syncLock(*syncMtx);
 
-        auto stateResult = CloudStorage::FetchCloudState(accountId, appId);
-        if (stateResult.status == CloudStorage::StateFetchStatus::Ok) {
-            auto& state = stateResult.state;
-            uint64_t now = static_cast<uint64_t>(time(nullptr));
+        auto& state = stateResult.state;
+        uint64_t now = static_cast<uint64_t>(time(nullptr));
 
-            if (state.hasActiveSession() &&
-                state.session.clientId != currentSession.clientId) {
-                // Another machine holds the session lock. Steam shows conflict dialog;
-                // "Play Anyway" (ignore_pending_operations) overrides orphaned sessions.
-                LOG("[NS] LaunchIntent app=%u: another session active (machine=%s, client=%llu, age=%llus)",
-                    appId, state.session.machineName.c_str(),
-                    state.session.clientId,
-                    now - state.session.timeLastUpdated);
-                PB::Writer op;
-                op.WriteVarint(1, 1); // operation = AppSessionActive
-                op.WriteString(2, state.session.machineName);
-                op.WriteVarint(3, state.session.clientId);
-                op.WriteVarint(4, static_cast<uint32_t>(state.session.timeLastUpdated));
-                body.WriteSubmessage(1, op);
+        if (state.hasActiveSession() &&
+            state.session.clientId != currentSession.clientId) {
+            // Another machine holds session lock; EResult=108 triggers conflict UI.
+            LOG("[NS] LaunchIntent app=%u: another session active (machine=%s, client=%llu, age=%llus)",
+                appId, state.session.machineName.c_str(),
+                state.session.clientId,
+                now - state.session.timeLastUpdated);
+            PB::Writer op;
+            op.WriteVarint(1, 1); // operation = AppSessionActive
+            op.WriteString(2, state.session.machineName);
+            op.WriteVarint(3, state.session.clientId);
+            op.WriteVarint(4, static_cast<uint32_t>(state.session.timeLastUpdated));
+            body.WriteSubmessage(1, op);
 
-                if (!ignorePendingOperations) {
-                    // Steam expects EResult=108 to trigger the conflict UI.
-                    sessionConflict = true;
-                } else {
-                    // "Play anyway" -- override stale session.
-                    state.session.clientId = currentSession.clientId;
-                    state.session.machineName = currentSession.machineName;
-                    state.session.timeLastUpdated = now;
-                    state.session.operation = "active";
-                    if (!CloudStorage::PublishCloudState(accountId, appId, state, stateResult.etag)) {
-                        LOG("[NS] LaunchIntent app=%u: session override publish failed (best-effort)", appId);
-                    }
-                    LOG("[NS] LaunchIntent app=%u: forced session override (machine=%s, client=%llu)",
-                        appId, currentSession.machineName.c_str(), currentSession.clientId);
-                }
+            if (!ignorePendingOperations) {
+                // Steam expects EResult=108 to trigger the conflict UI.
+                sessionConflict = true;
             } else {
+                // "Play anyway" -- override stale session.
                 state.session.clientId = currentSession.clientId;
                 state.session.machineName = currentSession.machineName;
                 state.session.timeLastUpdated = now;
                 state.session.operation = "active";
                 if (!CloudStorage::PublishCloudState(accountId, appId, state, stateResult.etag)) {
-                    LOG("[NS] LaunchIntent app=%u: session acquire publish failed (best-effort)", appId);
+                    // Retry once without etag.
+                    if (!CloudStorage::PublishCloudState(accountId, appId, state)) {
+                        LOG("[NS] LaunchIntent app=%u: session override publish failed after retry", appId);
+                    }
                 }
-                LOG("[NS] LaunchIntent app=%u: acquired session (machine=%s, client=%llu)",
+                LOG("[NS] LaunchIntent app=%u: forced session override (machine=%s, client=%llu)",
                     appId, currentSession.machineName.c_str(), currentSession.clientId);
             }
+        } else {
+            state.session.clientId = currentSession.clientId;
+            state.session.machineName = currentSession.machineName;
+            state.session.timeLastUpdated = now;
+            state.session.operation = "active";
+            if (!CloudStorage::PublishCloudState(accountId, appId, state, stateResult.etag)) {
+                // Retry without etag (stale from racing ReleaseCloudSession).
+                LOG("[NS] LaunchIntent app=%u: session acquire publish failed, retrying without etag", appId);
+                auto freshResult = CloudStorage::FetchCloudState(accountId, appId);
+                if (freshResult.status == CloudStorage::StateFetchStatus::Ok) {
+                    auto& freshState = freshResult.state;
+                    if (freshState.hasActiveSession() &&
+                        freshState.session.clientId != currentSession.clientId) {
+                        // Another machine acquired the session in the window.
+                        LOG("[NS] LaunchIntent app=%u: another machine acquired session during retry", appId);
+                        sessionConflict = !ignorePendingOperations;
+                    } else {
+                        freshState.session = state.session;
+                        if (!CloudStorage::PublishCloudState(accountId, appId, freshState)) {
+                            LOG("[NS] LaunchIntent app=%u: session acquire retry also failed", appId);
+                        }
+                    }
+                }
+            }
+            LOG("[NS] LaunchIntent app=%u: acquired session (machine=%s, client=%llu)",
+                appId, currentSession.machineName.c_str(), currentSession.clientId);
         }
     }
 
     auto pending = PendingOpsJournal::RecordLaunchIntent(
         accountId, appId, currentSession, ignorePendingOperations);
+
+    // Launch intent clears pending-upload state.
+    PendingOpsJournal::ClearUploadPending(accountId, appId);
 
     for (const auto& entry : pending) {
         PB::Writer op;
@@ -1996,15 +2241,28 @@ RpcResult HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBody
         totalBytes += entry.size;
     }
 
+    // Report quota from PICS KV injection.
+    uint64_t maxBytes = kFallbackQuotaBytes;
+    uint32_t maxFiles = kFallbackMaxFiles;
+    uint64_t kvQuota = 0;
+    uint32_t kvFiles = 0;
+    if (SteamKvInjector::IsReady() &&
+        SteamKvInjector::ReadAppQuota(appId, kvQuota, kvFiles) &&
+        kvQuota > 0 && kvFiles > 0) {
+        maxBytes = kvQuota;
+        maxFiles = kvFiles;
+    }
+
     PB::Writer body;
     body.WriteVarint(1, ClampFileSizeToUint32((uint64_t)fileCount,
                                               "QuotaUsage.existing_files",
                                               appId, std::string{}));  // existing_files
     body.WriteVarint(2, totalBytes);                 // existing_bytes
-    body.WriteVarint(3, 10000);                      // max_num_files
-    body.WriteVarint(4, 1073741824ULL);              // max_num_bytes (1 GB)
+    body.WriteVarint(3, maxFiles);                   // max_num_files
+    body.WriteVarint(4, maxBytes);                   // max_num_bytes
 
-    LOG("[NS] QuotaUsage app=%u files=%zu bytes=%llu", appId, fileCount, totalBytes);
+    LOG("[NS] QuotaUsage app=%u files=%zu bytes=%llu (max %u/%llu)",
+        appId, fileCount, totalBytes, maxFiles, (unsigned long long)maxBytes);
     return body;
 }
 
@@ -2013,7 +2271,8 @@ RpcResult HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBody
     uint64_t batchId = BatchTracker_NextId();
     uint32_t accountId = 0;
     if (!RequireAccountId("BeginAppUploadBatch", appId, accountId)) {
-        return CloudRpcUtils::BuildBeginBatchResponseBody(batchId, 0);
+        // Fail early: error skips CompleteBatch, preventing orphaned local blobs.
+        return RpcResult(PB::Writer(), kEResultFail);
     }
 
     uint64_t currentCN = LocalStorage::GetChangeNumber(accountId, appId);
@@ -2313,14 +2572,32 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
         auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
         std::lock_guard<std::mutex> syncLock(*syncMtx);
 
+        // Fetch existing cloud state; fall back to local manifest.
         CloudStorage::CloudAppState state;
-        auto localManifest = CloudStorage::LoadLocalManifest(accountId, appId);
-        for (const auto& [name, me] : localManifest) {
-            CloudStorage::FileEntry fe;
-            fe.sha = me.sha;
-            fe.timestamp = me.timestamp;
-            fe.size = me.size;
-            state.files[name] = std::move(fe);
+        bool haveCloudBase = false;
+        if (CloudStorage::IsCloudActive()) {
+            auto result = CloudStorage::FetchCloudState(accountId, appId);
+            if (result.status == CloudStorage::StateFetchStatus::Ok) {
+                state = std::move(result.state);
+                haveCloudBase = true;
+            }
+        }
+        // If cloud CN is behind local, rebuild file list from manifest (keep session/quota).
+        uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
+        if (!haveCloudBase || state.cn < localCN) {
+            if (haveCloudBase && state.cn < localCN) {
+                LOG("[NS] CompleteBatch app %u: cloud CN %llu < local CN %llu, rebuilding file list from local manifest",
+                    appId, (unsigned long long)state.cn, (unsigned long long)localCN);
+            }
+            state.files.clear();
+            auto localManifest = CloudStorage::LoadLocalManifest(accountId, appId);
+            for (const auto& [name, me] : localManifest) {
+                CloudStorage::FileEntry fe;
+                fe.sha = me.sha;
+                fe.timestamp = me.timestamp;
+                fe.size = me.size;
+                state.files[name] = std::move(fe);
+            }
         }
 
         for (const auto& filename : deletes)
@@ -2359,14 +2636,37 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
         // Steam ignores CompleteBatch eresult, so retry async on failure.
         if (!CloudStorage::PublishCloudState(accountId, appId, state)) {
             LOG("[NS] CompleteBatch: state publish failed for app %u; scheduling async retry", appId);
-            auto stateCopy = std::make_shared<CloudStorage::CloudAppState>(state);
-            std::thread([stateCopy, accountId, appId] {
+            // Capture file data only; retry re-fetches live state.
+            auto filesToMerge = std::make_shared<std::unordered_map<std::string, CloudStorage::FileEntry>>(state.files);
+            uint64_t retryCN = state.cn;
+            uint64_t retryBuildId = state.appBuildId;
+            std::thread([filesToMerge, retryCN, retryBuildId, accountId, appId] {
                 constexpr int kMaxRetries = 3;
                 constexpr int kBaseDelayMs = 2000;
                 for (int attempt = 1; attempt <= kMaxRetries; ++attempt) {
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(kBaseDelayMs * attempt));
-                    if (CloudStorage::PublishCloudState(accountId, appId, *stateCopy)) {
+                    // Re-fetch live state under sync mutex to preserve session changes.
+                    auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
+                    std::lock_guard<std::mutex> lock(*syncMtx);
+                    auto result = CloudStorage::FetchCloudState(accountId, appId);
+                    if (result.status != CloudStorage::StateFetchStatus::Ok) {
+                        // Cloud fetch failed; skip to avoid erasing session lock.
+                        LOG("[NS] CompleteBatch: retry %d/%d skipped for app %u: cloud fetch failed",
+                            attempt, kMaxRetries, appId);
+                        continue;
+                    }
+                    CloudStorage::CloudAppState retryState = std::move(result.state);
+                    // Abort if a newer CN already committed.
+                    if (retryState.cn > retryCN) {
+                        LOG("[NS] CompleteBatch: retry aborted for app %u: cloud CN %llu > batch CN %llu",
+                            appId, retryState.cn, retryCN);
+                        return;
+                    }
+                    retryState.files = *filesToMerge;
+                    retryState.cn = retryCN;
+                    retryState.appBuildId = retryBuildId;
+                    if (CloudStorage::PublishCloudState(accountId, appId, retryState)) {
                         LOG("[NS] CompleteBatch: async retry %d/%d succeeded for app %u",
                             attempt, kMaxRetries, appId);
                         return;
@@ -2382,6 +2682,7 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
 
     BatchTracker_Clear(accountId, appId, batch.batchId);
     PendingOpsJournal::RecordUploadBatchEnd(accountId, appId);
+    SetCloudSyncState(appId, "synchronized");
     LOG("[NS] CompleteBatch app=%u CN=%llu (state published atomically)", appId, newCN);
 
     ClearBatchCanonicalTokens(accountId, appId);

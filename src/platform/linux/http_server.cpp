@@ -22,6 +22,7 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 static std::string g_blobRoot;
 static uint32_t g_accountId = 0;
@@ -40,6 +41,26 @@ static std::vector<ClientThread> g_clientThreads;
 static std::mutex g_clientMutex;
 static std::set<int> g_clientFds;
 static std::mutex g_clientFdMutex;
+
+// In-memory blob fallback when disk write fails (permission issue, etc).
+struct BlobKey {
+    uint32_t accountId;
+    uint32_t appId;
+    std::string filename;
+    bool operator==(const BlobKey& o) const {
+        return accountId == o.accountId && appId == o.appId && filename == o.filename;
+    }
+};
+struct BlobKeyHash {
+    size_t operator()(const BlobKey& k) const {
+        size_t h = std::hash<uint32_t>{}(k.accountId);
+        h ^= std::hash<uint32_t>{}(k.appId) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<std::string>{}(k.filename) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+static std::mutex g_memBlobMtx;
+static std::unordered_map<BlobKey, std::vector<uint8_t>, BlobKeyHash> g_memBlobs;
 
 static void RegisterClientFd(int fd) {
     std::lock_guard<std::mutex> lock(g_clientFdMutex);
@@ -468,16 +489,19 @@ static void HandleConnection(int clientFd) {
             return;
         }
         
+        size_t storedSize = bodyData.size();
         if (!FileUtil::AtomicWriteBinary(filePath, bodyData.data(), bodyData.size())) {
-            LOG("[HttpServer] PUT %s -> WRITE FAILED for %s", path.c_str(), filePath.c_str());
-            const char* resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
-            send(clientFd, resp, strlen(resp), 0);
-            close(clientFd);
-            return;
+            LOG("[HttpServer] PUT %s -> disk write failed, holding %zu bytes in memory",
+                path.c_str(), storedSize);
+            std::lock_guard<std::mutex> lk(g_memBlobMtx);
+            g_memBlobs[{accountId, appId, filename}] = std::move(bodyData);
+        } else {
+            std::lock_guard<std::mutex> lk(g_memBlobMtx);
+            g_memBlobs.erase({accountId, appId, filename});
         }
         
         LOG("[HttpServer] PUT %s -> stored %zu bytes (app %u, file %s)",
-            path.c_str(), bodyData.size(), appId, filename.c_str());
+            path.c_str(), storedSize, appId, filename.c_str());
         const char* resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
         send(clientFd, resp, strlen(resp), 0);
         close(clientFd);
@@ -662,6 +686,11 @@ uint16_t GetPort() {
 }
 
 bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        if (g_memBlobs.count({accountId, appId, filename}))
+            return true;
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!FileUtil::IsPathWithin(g_blobRoot, path)) return false;
     std::error_code ec;
@@ -669,6 +698,12 @@ bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
 }
 
 uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        auto it = g_memBlobs.find({accountId, appId, filename});
+        if (it != g_memBlobs.end())
+            return (uint64_t)it->second.size();
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!FileUtil::IsPathWithin(g_blobRoot, path)) return 0;
     std::error_code ec;
@@ -677,6 +712,19 @@ uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& file
 }
 
 std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        auto it = g_memBlobs.find({accountId, appId, filename});
+        if (it != g_memBlobs.end()) {
+            std::vector<uint8_t> data = it->second;  // copy out
+            // Retry disk write now that the lock is likely released.
+            std::string blobPath = BlobPath(accountId, appId, filename);
+            if (FileUtil::AtomicWriteBinary(blobPath, data.data(), data.size())) {
+                g_memBlobs.erase(it);
+            }
+            return data;
+        }
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!FileUtil::IsPathWithin(g_blobRoot, path)) return {};
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -691,6 +739,10 @@ std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::str
 }
 
 bool DeleteBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        g_memBlobs.erase({accountId, appId, filename});
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!FileUtil::IsPathWithin(g_blobRoot, path)) return false;
     std::error_code ec;

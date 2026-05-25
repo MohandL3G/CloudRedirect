@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     }
     
     // Prepend "--cli" to arguments if not already present
-    // This allows: cloud_redirect_cli auth-status gdrive
+    // Allows: cloud_redirect_cli auth-status gdrive
     // Instead of: cloud_redirect_cli --cli auth-status gdrive
     int exitCode;
     if (argc >= 2 && strcmp(argv[1], "--cli") == 0) {

@@ -83,7 +83,7 @@ static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17A70E8;
 // CCMInterface vtable RVA (for validation)
 static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x128E7A0;
-// sub_138D199E0 = CNetPacketΓåÆCProtoBufNetPacket wrapper
+// sub_138D199E0 = CNetPacket::CProtoBufNetPacket wrapper
 static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xD199E0;
 // sub_138D263B0 = CJobMgr::BRouteMsgToJob
 static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD263B0;
@@ -677,10 +677,10 @@ static std::vector<uint8_t> BuildPacket(uint32_t emsg, const PB::Writer& header,
 // CCMInterface discovery via CSteamEngine global
 //
 // Traversal: qword_139781D38 (global CSteamEngine*)
-//   ΓåÆ engine+3144 (uint32 global user handle)
-//   ΓåÆ engine+3296 (CUtlSortedVector user map)
-//     ΓåÆ array[i] where handle matches ΓåÆ CUser*
-//   ΓåÆ CUser+72 (CCMInterface embedded in CBaseUser)
+//   -> engine+3144 (uint32 global user handle)
+//   -> engine+3296 (CUtlSortedVector user map)
+//     -> array[i] where handle matches -> CUser*
+//   -> CUser+72 (CCMInterface embedded in CBaseUser)
 static void* FindCCMInterface() {
     uintptr_t userPtr = FindCurrentUser();
     if (!userPtr) return nullptr;
@@ -2976,7 +2976,7 @@ static void UploadLuaOnShutdown() {
 }
 
 // Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.
-static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1778281814ULL, 1778003620ULL, 1777411435ULL };
+static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1779486452ULL, 1778281814ULL, 1778003620ULL };
 
 static bool IsSupportedSteamVersion(uint64_t v) {
     for (uint64_t s : SUPPORTED_STEAM_VERSIONS)
@@ -3118,7 +3118,7 @@ static void PreStageStatsFromLocalCache(const std::string& steamPath) {
 // DLL auto-update: check GitHub for a newer cloud_redirect.dll, replace on disk.
 
 static bool ParseVersion(const std::string& s, int out[3]) {
-    // "2.0.3" or "v2.0.3" ΓåÆ {2, 0, 3}
+    // "2.0.3" or "v2.0.3" -> {2, 0, 3}
     const char* p = s.c_str();
     if (*p == 'v' || *p == 'V') ++p;
     return sscanf(p, "%d.%d.%d", &out[0], &out[1], &out[2]) == 3;
@@ -3516,7 +3516,7 @@ void Init(const std::string& steamPath) {
     if (!g_steamPath.empty() && g_steamPath.back() != '\\')
         g_steamPath += '\\';
 
-    // ΓöÇΓöÇ Steam version gate ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+    // Steam version gate
     uint64_t detectedVersion = ReadSteamVersion(g_steamPath);
     g_detectedSteamVersion.store(detectedVersion, std::memory_order_relaxed);
     if (detectedVersion == 0) {

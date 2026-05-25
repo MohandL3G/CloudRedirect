@@ -3,6 +3,7 @@
 #include "cloud_metadata_paths.h"
 #include "file_util.h"
 #include "json.h"
+#include "local_storage.h"
 #include "log.h"
 #include "manifest_store.h"
 
@@ -241,9 +242,23 @@ StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId) {
                         std::string filename = fi.path.substr(blobPrefix.size());
                         if (filename.empty() || CloudIntercept::IsReservedBlobFilename(filename))
                             continue;
+                        // Strip CAS SHA leaf: "subdir/file.sav/a1b2c3..." -> "subdir/file.sav"
+                        size_t lastSlash = filename.rfind('/');
+                        if (lastSlash != std::string::npos && lastSlash + 1 < filename.size()) {
+                            std::string leaf = filename.substr(lastSlash + 1);
+                            if (leaf.size() == 40 &&
+                                leaf.find_first_not_of("0123456789abcdef") == std::string::npos) {
+                                filename = filename.substr(0, lastSlash);
+                            }
+                        }
+                        if (filename.empty()) continue;
                         FileEntry fe;
                         fe.size = fi.size;
                         fe.timestamp = fi.modifiedTime;
+                        // CAS dedup: if multiple SHAs exist for same file, keep largest (latest upload).
+                        auto it = state.files.find(filename);
+                        if (it != state.files.end() && it->second.timestamp >= fe.timestamp)
+                            continue;
                         state.files[filename] = std::move(fe);
                     }
                 }
@@ -299,6 +314,15 @@ bool PublishCloudState(uint32_t accountId, uint32_t appId,
         return false;
     }
 
+    // Keep cn.cloudredirect in sync for lightweight CN probes.
+    if (state.cn > 0) {
+        std::string cnStr = std::to_string(state.cn);
+        std::string cnPath = CloudMetadataPath(accountId, appId,
+            CloudIntercept::kCNFilename);
+        g_stateProvider->Upload(cnPath,
+            reinterpret_cast<const uint8_t*>(cnStr.data()), cnStr.size());
+    }
+
     LOG("[AppState] PublishCloudState app %u: published CN=%llu, %zu files",
         appId, state.cn, state.files.size());
     return true;
@@ -314,6 +338,23 @@ void ReleaseCloudSession(uint32_t accountId, uint32_t appId, uint64_t clientId) 
 
     auto& state = result.state;
     if (state.session.clientId == clientId || clientId == 0) {
+        // Reconcile stale file list from local manifest if previous publish failed.
+        uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
+        if (localCN > state.cn) {
+            LOG("[AppState] ReleaseCloudSession app %u: local CN %llu > cloud CN %llu, reconciling file list",
+                appId, (unsigned long long)localCN, (unsigned long long)state.cn);
+            state.files.clear();
+            auto localManifest = LoadLocalManifest(accountId, appId);
+            for (const auto& [name, me] : localManifest) {
+                FileEntry fe;
+                fe.sha = me.sha;
+                fe.timestamp = me.timestamp;
+                fe.size = me.size;
+                state.files[name] = std::move(fe);
+            }
+            state.cn = localCN;
+        }
+
         state.session = {};
         if (!PublishCloudState(accountId, appId, state, result.etag)) {
             LOG("[AppState] ReleaseCloudSession app %u: publish failed (best-effort)", appId);

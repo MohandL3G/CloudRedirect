@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -42,6 +43,26 @@ static std::string g_blobRoot; // persistent blob storage directory
 static std::atomic<uint32_t> g_accountId{0}; // Steam account ID for namespace isolation
 static std::atomic<int64_t> g_maxUploadBytes{256 * 1024 * 1024}; // 256 MB default, 0 = unlimited
 static std::mutex g_clientMtx;
+
+// In-memory blob fallback when disk write fails (antivirus lock, etc).
+struct BlobKey {
+    uint32_t accountId;
+    uint32_t appId;
+    std::string filename;
+    bool operator==(const BlobKey& o) const {
+        return accountId == o.accountId && appId == o.appId && filename == o.filename;
+    }
+};
+struct BlobKeyHash {
+    size_t operator()(const BlobKey& k) const {
+        size_t h = std::hash<uint32_t>{}(k.accountId);
+        h ^= std::hash<uint32_t>{}(k.appId) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<std::string>{}(k.filename) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+static std::mutex g_memBlobMtx;
+static std::unordered_map<BlobKey, std::vector<uint8_t>, BlobKeyHash> g_memBlobs;
 
 struct ClientSlot {
     std::thread                    thread;
@@ -295,22 +316,21 @@ static void HandleClient(SOCKET client) {
                 return;
             }
 
-            // Atomic write blob to disk
+            // Write blob to disk; stash in memory on failure.
             DWORD writeErr = 0;
+            size_t storedSize = bodyData.size();
             if (!FileUtil::AtomicWriteBinary(blobPath, bodyData.data(), bodyData.size(), &writeErr)) {
-                LOG("[HTTP] PUT %s -> WRITE FAILED for %s (err=%lu)", path, blobPath.c_str(), (unsigned long)writeErr);
-                const char* errResponse =
-                    "HTTP/1.1 500 Internal Server Error\r\n"
-                    "Content-Length: 0\r\n"
-                    "Connection: close\r\n"
-                    "\r\n";
-                send(client, errResponse, (int)strlen(errResponse), 0);
-                shutdown(client, SD_SEND);
-                closesocket(client);
-                return;
+                LOG("[HTTP] PUT %s -> disk write failed (err=%lu), holding %zu bytes in memory",
+                    path, (unsigned long)writeErr, storedSize);
+                std::lock_guard<std::mutex> lk(g_memBlobMtx);
+                g_memBlobs[{accountId, appId, filename}] = std::move(bodyData);
+            } else {
+                // Disk write succeeded; clear any stale in-memory entry.
+                std::lock_guard<std::mutex> lk(g_memBlobMtx);
+                g_memBlobs.erase({accountId, appId, filename});
             }
             LOG("[HTTP] PUT %s -> stored %zu bytes (app %u, file %s)",
-                path, bodyData.size(), appId, filename.c_str());
+                path, storedSize, appId, filename.c_str());
 
             // return 200 OK (matches what Steam expects from Valve's storage)
             const char* response =
@@ -621,6 +641,11 @@ static bool ValidateBlobPath(const std::string& blobPath) {
 }
 
 bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        if (g_memBlobs.count({accountId, appId, filename}))
+            return true;
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     std::error_code ec;
@@ -629,6 +654,12 @@ bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
 }
 
 uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        auto it = g_memBlobs.find({accountId, appId, filename});
+        if (it != g_memBlobs.end())
+            return (uint64_t)it->second.size();
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return 0;
     std::error_code ec;
@@ -637,6 +668,19 @@ uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& file
 }
 
 std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        auto it = g_memBlobs.find({accountId, appId, filename});
+        if (it != g_memBlobs.end()) {
+            std::vector<uint8_t> data = it->second;  // copy out
+            // Retry disk write now that the lock is likely released.
+            std::string blobPath = BlobPath(accountId, appId, filename);
+            if (FileUtil::AtomicWriteBinary(blobPath, data.data(), data.size(), nullptr)) {
+                g_memBlobs.erase(it);
+            }
+            return data;
+        }
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return {};
     std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary);
@@ -648,6 +692,10 @@ std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::str
 }
 
 bool DeleteBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    {
+        std::lock_guard<std::mutex> lk(g_memBlobMtx);
+        g_memBlobs.erase({accountId, appId, filename});
+    }
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     std::error_code ec;

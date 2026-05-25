@@ -58,9 +58,7 @@ using AutoCloudUtil::ReadU32;
 using AutoCloudUtil::ToLowerAscii;
 using AutoCloudUtil::WildcardMatchInsensitive;
 
-// ============================================================================
 // Steam library path discovery
-// ============================================================================
 
 static std::vector<std::filesystem::path> GetSteamLibraryPaths(const std::string& steamPath) {
     std::vector<std::filesystem::path> paths;
@@ -123,9 +121,150 @@ static std::string FindGameInstallPath(const std::string& steamPath, uint32_t ap
     return {};
 }
 
-// ============================================================================
+static std::string GetAccountNameFromLoginUsers(const std::string& steamPath, uint32_t accountId) {
+    auto vdfPath = FileUtil::Utf8ToPath(steamPath) / "config" / "loginusers.vdf";
+    std::ifstream f(vdfPath);
+    if (!f) return {};
+
+    std::string line;
+    uint64_t currentSteamId = 0;
+    bool inUser = false;
+    int braceDepth = 0;
+
+    while (std::getline(f, line)) {
+        size_t start = line.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) continue;
+        std::string trimmed = line.substr(start);
+
+        if (trimmed == "{") { braceDepth++; continue; }
+        if (trimmed == "}") { braceDepth--; if (braceDepth == 1) inUser = false; continue; }
+
+        if (braceDepth == 1 && trimmed.size() > 2 && trimmed[0] == '"') {
+            size_t endQuote = trimmed.find('"', 1);
+            if (endQuote != std::string::npos) {
+                std::string key = trimmed.substr(1, endQuote - 1);
+                char* endp = nullptr;
+                uint64_t sid = strtoull(key.c_str(), &endp, 10);
+                if (endp == key.c_str() + key.size() && sid > 76561197960265728ULL) {
+                    currentSteamId = sid;
+                    inUser = true;
+                }
+            }
+        }
+
+        if (inUser && braceDepth == 2 && (uint32_t)(currentSteamId & 0xFFFFFFFF) == accountId) {
+            size_t kStart = trimmed.find('"');
+            if (kStart == std::string::npos) continue;
+            size_t kEnd = trimmed.find('"', kStart + 1);
+            if (kEnd == std::string::npos) continue;
+            std::string key = trimmed.substr(kStart + 1, kEnd - kStart - 1);
+            if (_stricmp(key.c_str(), "AccountName") != 0) continue;
+            size_t vStart = trimmed.find('"', kEnd + 1);
+            if (vStart == std::string::npos) continue;
+            size_t vEnd = trimmed.find('"', vStart + 1);
+            if (vEnd == std::string::npos) continue;
+            return trimmed.substr(vStart + 1, vEnd - vStart - 1);
+        }
+    }
+    return {};
+}
+
+static std::string GetAppNameFromAppInfo(const std::string& steamPath, uint32_t appId) {
+    std::filesystem::path appInfoPath = FileUtil::Utf8ToPath(steamPath) / "appcache" / "appinfo.vdf";
+    std::ifstream f(appInfoPath, std::ios::binary);
+    if (!f) return {};
+
+    uint8_t hdr[16];
+    if (!f.read(reinterpret_cast<char*>(hdr), 16)) return {};
+    uint32_t magic = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16) | (hdr[3] << 24);
+    if (magic != 0x07564429) return {};
+    uint64_t stringOffset = (uint64_t)(hdr[8] | (hdr[9] << 8) | (hdr[10] << 16) | (hdr[11] << 24))
+                          | ((uint64_t)(hdr[12] | (hdr[13] << 8) | (hdr[14] << 16) | (hdr[15] << 24)) << 32);
+
+    while (f) {
+        uint8_t rec[8];
+        if (!f.read(reinterpret_cast<char*>(rec), 4)) break;
+        uint32_t recordAppId = rec[0] | (rec[1] << 8) | (rec[2] << 16) | (rec[3] << 24);
+        if (recordAppId == 0) break;
+        if (!f.read(reinterpret_cast<char*>(rec + 4), 4)) break;
+        uint32_t size = rec[4] | (rec[5] << 8) | (rec[6] << 16) | (rec[7] << 24);
+        if (size == 0) break;
+
+        if (recordAppId != appId) {
+            f.seekg(size, std::ios::cur);
+            continue;
+        }
+        if (size < 60 || size > 4 * 1024 * 1024) return {};
+
+        auto savedPos = f.tellg();
+        f.seekg(static_cast<std::streamoff>(stringOffset), std::ios::beg);
+        if (!f) return {};
+        uint8_t stHdr[4];
+        if (!f.read(reinterpret_cast<char*>(stHdr), 4)) return {};
+        uint32_t stringCount = stHdr[0] | (stHdr[1] << 8) | (stHdr[2] << 16) | (stHdr[3] << 24);
+        if (stringCount > kMaxAppInfoStrings) return {};
+
+        auto stStart = f.tellg();
+        f.seekg(0, std::ios::end);
+        auto stEnd = f.tellg();
+        if (stStart < 0 || stEnd < stStart) return {};
+        auto stSize64 = static_cast<uint64_t>(stEnd - stStart);
+        if (stSize64 > kMaxAppInfoBytes) return {};
+        f.seekg(stStart);
+        size_t stSize = static_cast<size_t>(stSize64);
+        std::vector<uint8_t> stBytes;
+        try { stBytes.resize(stSize); } catch (...) { return {}; }
+        if (!f.read(reinterpret_cast<char*>(stBytes.data()), stSize)) return {};
+
+        std::vector<std::string> strings;
+        try { strings.reserve(stringCount); } catch (...) { return {}; }
+        size_t stOff = 0;
+        for (uint32_t i = 0; i < stringCount && stOff < stBytes.size(); ++i)
+            strings.push_back(ReadCStringFromBytes(stBytes, stOff));
+
+        f.seekg(savedPos);
+        f.seekg(60, std::ios::cur);
+        uint32_t kvSize = size - 60;
+        std::vector<uint8_t> kv;
+        try { kv.resize(kvSize); } catch (...) { return {}; }
+        if (!f.read(reinterpret_cast<char*>(kv.data()), kvSize)) return {};
+
+        size_t kvOffset = 0;
+        auto tree = ParseAppInfoKV(kv, kvOffset, strings);
+        const auto* appInfo = FindChild(tree, "appinfo");
+        if (!appInfo) return {};
+        const auto* common = FindChild(appInfo->children, "common");
+        if (!common) return {};
+        const auto* name = FindChild(common->children, "name");
+        if (name && name->hasString && !name->stringValue.empty())
+            return name->stringValue;
+        return {};
+    }
+    return {};
+}
+
+static std::string BuildSteamCloudDocumentsPath(const std::string& steamPath,
+                                                 const std::string& myDocuments,
+                                                 uint32_t accountId,
+                                                 uint32_t appId) {
+    if (myDocuments.empty() || accountId == 0) return {};
+    std::string accountName = GetAccountNameFromLoginUsers(steamPath, accountId);
+    if (accountName.empty()) {
+        LOG("BuildSteamCloudDocumentsPath: could not resolve account name for accountId=%u", accountId);
+        return {};
+    }
+    std::string appName = GetAppNameFromAppInfo(steamPath, appId);
+    if (appName.empty())
+        appName = "App " + std::to_string(appId);
+
+#ifdef _WIN32
+    return myDocuments + "Steam Cloud\\" + accountName + "\\" + appName + "\\";
+#else
+    return myDocuments + "Steam Cloud/" + accountName + "/" + appName + "/";
+#endif
+}
+
 // AutoCloud rules loading
-// ============================================================================
 
 // Check compat.vdf to detect Proton (matches CCompatManager::LoadPlatformOverrideCache).
 static AutoCloudEffectivePlatform DetectEffectivePlatform(const std::string& steamPath, uint32_t appId,
@@ -378,6 +517,9 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
 
             const auto* excludes = FindChild(entry.children, "exclude");
             if (excludes) {
+                if (excludes->hasString && !excludes->stringValue.empty()) {
+                    rule.excludes.push_back(excludes->stringValue);
+                }
                 for (const auto& ex : excludes->children) {
                     if (ex.hasString && !ex.stringValue.empty()) {
                         rule.excludes.push_back(ex.stringValue);
@@ -433,9 +575,7 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
     return rules;
 }
 
-// ============================================================================
 // SHA1 for files
-// ============================================================================
 
 // Whole-file SHA1; bounded by kMaxAutoCloudCandidateBytes.
 static std::vector<uint8_t> SHA1File(const std::string& path) {
@@ -458,9 +598,7 @@ static std::vector<uint8_t> SHA1File(const std::string& path) {
 
 } // anonymous namespace
 
-// ============================================================================
 // Public API
-// ============================================================================
 
 namespace AutoCloudScan {
 
@@ -486,6 +624,7 @@ ScanResult GetFileList(const std::string& steamPath,
     auto rules = LoadAutoCloudRules(steamPath, appId, effectivePlatform);
     if (rules.empty()) {
         LOG("GetAutoCloudFileList: no appinfo UFS save rules for app %u", appId);
+        outResult.complete = true; // no rules = nothing to scan, trivially complete
         return outResult;
     }
     outResult.hasRules = true;
@@ -670,6 +809,17 @@ ScanResult GetFileList(const std::string& steamPath,
     const auto& rSavedGames    = rootFor("WinSavedGames");
     const auto& rProgramData   = rootFor("WinProgramData");
     const auto& rWindowsHome   = rootFor("WindowsHome");
+    const auto& rSteamBase     = rootFor("SteamUserBaseStorage");
+    const auto& rCloudDocs     = rootFor("SteamCloudDocuments");
+
+#ifdef _WIN32
+    std::string steamBasePath = steamPath + "\\";
+#else
+    std::string steamBasePath = steamPath + "/";
+#endif
+    std::string steamCloudDocsPath = BuildSteamCloudDocumentsPath(
+        steamPath, myDocuments, accountId, appId);
+
 #ifndef _WIN32
     const auto& rLinuxHome     = rootFor("LinuxHome");
     const auto& rLinuxXdgData  = rootFor("LinuxXdgDataHome");
@@ -702,6 +852,8 @@ ScanResult GetFileList(const std::string& steamPath,
         {rSavedGames.bareName,  rSavedGames.token,      rSavedGames.rootId, savedGames},
         {rProgramData.bareName, rProgramData.token,     rProgramData.rootId, programData},
         {rWindowsHome.bareName, rWindowsHome.token,     rWindowsHome.rootId, windowsHome},
+        {rSteamBase.bareName,   rSteamBase.token,       rSteamBase.rootId,   steamBasePath},
+        {rCloudDocs.bareName,   rCloudDocs.token,       rCloudDocs.rootId,   steamCloudDocsPath},
 #ifndef _WIN32
         {rLinuxHome.bareName,   rLinuxHome.token,       rLinuxHome.rootId,   linuxHome},
         {rLinuxXdgData.bareName, rLinuxXdgData.token,   rLinuxXdgData.rootId, linuxXdgDataHome},
@@ -937,18 +1089,12 @@ ScanResult GetFileList(const std::string& steamPath,
 // GetRules: parsed savefiles rules for KV injection.
 
 std::vector<AutoCloudUtil::AutoCloudRuleNative> GetRules(
-    const std::string& steamPath, uint32_t appId) {
-    // Use current platform (injection only needs rule structure, not Proton awareness).
-    AutoCloudEffectivePlatform platform = AutoCloudEffectivePlatform::Current;
-#ifndef _WIN32
-    platform = DetectEffectivePlatform(steamPath, appId, 0);
-#endif
-    return LoadAutoCloudRules(steamPath, appId, platform);
+    const std::string& steamPath, uint32_t appId, uint32_t accountId) {
+    (void)accountId;
+    return LoadAutoCloudRules(steamPath, appId, AutoCloudEffectivePlatform::Current);
 }
 
-// ============================================================================
 // GetRootOverrides - exposes raw rootoverrides for cross-platform mapping
-// ============================================================================
 
 std::vector<AutoCloudUtil::AutoCloudRootOverrideNative> GetRootOverrides(
     const std::string& steamPath, uint32_t appId) {
@@ -1204,6 +1350,18 @@ std::unordered_map<std::string, std::string> GetRootTokenDirectories(
         result["%WinProgramData%"] = programData;
     if (!windowsHome.empty())
         result["%WindowsHome%"] = windowsHome;
+
+#ifdef _WIN32
+    result["%SteamUserBaseStorage%"] = steamPath + "\\";
+#else
+    result["%SteamUserBaseStorage%"] = steamPath + "/";
+#endif
+
+    std::string steamCloudDocs = BuildSteamCloudDocumentsPath(
+        steamPath, myDocuments, accountId, appId);
+    if (!steamCloudDocs.empty())
+        result["%SteamCloudDocuments%"] = steamCloudDocs;
+
 #ifndef _WIN32
     if (!linuxHome.empty())
         result["%LinuxHome%"] = linuxHome;

@@ -28,9 +28,7 @@
 
 namespace AutoCloudUtil {
 
-// ============================================================================
 // Constants
-// ============================================================================
 
 static constexpr uintmax_t kMaxAppInfoBytes = 512ULL * 1024 * 1024;
 static constexpr uint32_t kMaxAppInfoStrings = 200000;
@@ -43,9 +41,7 @@ static constexpr size_t kMaxWildcardPatternLen = 1024;
 static constexpr int kMaxWildcardStars = 16;
 static constexpr int kMaxWildcardIterations = 100000;
 
-// ============================================================================
 // String utilities
-// ============================================================================
 
 inline std::string ToLowerAscii(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -93,9 +89,7 @@ inline bool IsSafeRelativePath(const std::string& path) {
     return true;
 }
 
-// ============================================================================
 // Filesystem time conversion
-// ============================================================================
 
 inline uint64_t FileTimeToUnixSeconds(std::filesystem::file_time_type ftime) {
     auto fileNow = std::filesystem::file_time_type::clock::now();
@@ -113,9 +107,7 @@ inline std::filesystem::file_time_type UnixSecondsToFileTime(uint64_t unixSecond
     return fileNow + (sysTime - sysNow);
 }
 
-// ============================================================================
 // Platform-specific path resolution
-// ============================================================================
 
 #ifdef _WIN32
 inline std::string GetKnownFolderPathString(const KNOWNFOLDERID& id) {
@@ -127,9 +119,7 @@ inline std::string GetKnownFolderPathString(const KNOWNFOLDERID& id) {
 }
 #endif
 
-// ============================================================================
 // Binary KV parsing for appinfo.vdf
-// ============================================================================
 
 inline bool ReadU32(const std::vector<uint8_t>& data, size_t& offset, uint32_t& out) {
     if (offset + 4 > data.size()) return false;
@@ -156,9 +146,7 @@ inline std::string ReadCStringFromBytes(const std::vector<uint8_t>& data, size_t
     return s;
 }
 
-// ============================================================================
 // AutoCloud rule structures
-// ============================================================================
 
 struct AutoCloudRuleNative {
     std::string root;
@@ -198,9 +186,7 @@ enum class AutoCloudEffectivePlatform {
     Linux,
 };
 
-// ============================================================================
 // Sibling parsing
-// ============================================================================
 
 // Reject invalid sibling tokens.
 inline std::vector<std::string> ParseAutoCloudSiblings(const std::string& raw) {
@@ -229,9 +215,7 @@ inline std::vector<std::string> ParseAutoCloudSiblings(const std::string& raw) {
     return out;
 }
 
-// ============================================================================
 // Platform mask parsing
-// ============================================================================
 
 inline uint32_t ParseAutoCloudPlatformMask(const std::string& name) {
     std::string lower = ToLowerAscii(name);
@@ -257,9 +241,7 @@ inline bool AutoCloudRuleMatchesCurrentPlatform(uint32_t mask) {
     return AutoCloudRuleMatchesPlatform(mask, AutoCloudEffectivePlatform::Current);
 }
 
-// ============================================================================
 // appinfo.vdf KV tree parsing
-// ============================================================================
 
 inline std::vector<AppInfoKVNode> ParseAppInfoKV(const std::vector<uint8_t>& data, size_t& offset,
                                                  const std::vector<std::string>& strings, int depth = 0) {
@@ -316,9 +298,7 @@ inline const AppInfoKVNode* FindChild(const std::vector<AppInfoKVNode>& nodes, c
     return nullptr;
 }
 
-// ============================================================================
 // Windows version detection for root overrides
-// ============================================================================
 
 inline int WindowsVersionRank(std::string osName) {
     osName = ToLowerAscii(osName);
@@ -340,9 +320,7 @@ inline bool IsLinuxOS(const std::string& osName) {
 #include "autocloud_path_resolver.h"
 #endif
 
-// ============================================================================
 // Current Windows version detection
-// ============================================================================
 
 inline int CurrentWindowsVersionRank() {
 #ifdef _WIN32
@@ -361,9 +339,7 @@ inline int CurrentWindowsVersionRank() {
 #endif
 }
 
-// ============================================================================
 // Root override applicability checks
-// ============================================================================
 
 inline bool IsWindowsRootOverrideActive(const AutoCloudRootOverrideNative& overrideRule) {
     int target = WindowsVersionRank(overrideRule.os);
@@ -437,9 +413,7 @@ inline void ApplyRootOverridesForCurrentOS(AutoCloudRuleNative& rule,
     ApplyRootOverridesForPlatform(rule, overrides, AutoCloudEffectivePlatform::Current);
 }
 
-// ============================================================================
 // Wildcard matching (case-insensitive)
-// ============================================================================
 
 inline bool WildcardMatchImpl(const char* pattern, const char* text, int& iters) {
     if (--iters <= 0) return false;

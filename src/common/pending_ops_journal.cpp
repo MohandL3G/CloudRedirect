@@ -356,6 +356,23 @@ std::optional<Entry> LoadCurrentSession(uint32_t accountId, uint32_t appId) {
     return currentSession;
 }
 
+bool HasPendingUpload(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto entries = LoadEntriesUnlocked(accountId, appId);
+    for (const auto& entry : entries) {
+        if (entry.operation == Operation::UploadPending) return true;
+    }
+    return false;
+}
+
+void ClearUploadPending(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    std::optional<Entry> currentSession;
+    auto entries = LoadEntriesUnlocked(accountId, appId, &currentSession);
+    RemoveOperation(entries, Operation::UploadPending);
+    SaveStateUnlocked(accountId, appId, entries, currentSession);
+}
+
 void ClearPending(uint32_t accountId, uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_mutex);
     SaveStateUnlocked(accountId, appId, {}, std::nullopt);

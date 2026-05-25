@@ -17,6 +17,29 @@ using HttpUtil::HttpResp;
 static constexpr const char* CLIENT_ID = "b15665d9-eda6-4092-8539-0eec376afd59";
 static constexpr const char* CLIENT_SECRET = "qtyfaBBYA403=unZUP40~_#";
 
+std::string OneDriveProvider::GetOrFetchItemId(const std::string& itemPath) {
+    {
+        std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+        auto it = m_itemIdCache.find(itemPath);
+        if (it != m_itemIdCache.end())
+            return it->second;
+    }
+    auto r = ApiGet(itemPath + "?$select=id");
+    if (r.status != 200)
+        return {};
+    std::string id = Json::Parse(r.body)["id"].str();
+    if (id.empty())
+        return {};
+    std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+    m_itemIdCache[itemPath] = id;
+    return id;
+}
+
+void OneDriveProvider::InvalidateItemId(const std::string& itemPath) {
+    std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+    m_itemIdCache.erase(itemPath);
+}
+
 std::string OneDriveProvider::BuildRefreshBody(const std::string& refreshToken) const {
     return "client_id=" + UrlEncode(CLIENT_ID) +
         "&client_secret=" + UrlEncode(CLIENT_SECRET) +
@@ -141,24 +164,32 @@ OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId, bool* ok, boo
 
     auto folderPath = BuildFolderPath(accountId, appId);
     LOG("[OneDrive] ListAppFiles: looking up folder: %s", folderPath.c_str());
-    auto r = ApiGet(folderPath + "?$select=id");
-    if (r.status == 404) {
-        // Folder absent: empty-complete listing.
-        LOG("[OneDrive] ListAppFiles: folder not found (404)");
-        if (ok) *ok = true;
-        if (outComplete) *outComplete = true;
-        return result;
+    // Cache lookup; single fetch on miss (distinguishes 404 from error).
+    std::string folderId;
+    {
+        std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+        auto it = m_itemIdCache.find(folderPath);
+        if (it != m_itemIdCache.end()) folderId = it->second;
     }
-    if (r.status != 200) {
-        LOG("[OneDrive] ListAppFiles: folder lookup failed: HTTP %d", r.status);
-        return result;
-    }
-
-    auto fj = Json::Parse(r.body);
-    std::string folderId = fj["id"].str();
     if (folderId.empty()) {
-        LOG("[OneDrive] ListAppFiles: folder ID empty from response");
-        return result;
+        auto r = ApiGet(folderPath + "?$select=id");
+        if (r.status == 404) {
+            LOG("[OneDrive] ListAppFiles: folder not found (404)");
+            if (ok) *ok = true;
+            if (outComplete) *outComplete = true;
+            return result;
+        }
+        if (r.status != 200) {
+            LOG("[OneDrive] ListAppFiles: folder lookup failed: HTTP %d", r.status);
+            return result;
+        }
+        folderId = Json::Parse(r.body)["id"].str();
+        if (folderId.empty()) {
+            LOG("[OneDrive] ListAppFiles: folder ID empty from response");
+            return result;
+        }
+        std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+        m_itemIdCache[folderPath] = folderId;
     }
 
     LOG("[OneDrive] ListAppFiles: folder ID=%s, listing children", folderId.c_str());
@@ -212,18 +243,20 @@ bool OneDriveProvider::SimpleUpload(uint32_t accountId, uint32_t appId,
         return false;
     }
 
-    // set lastModifiedDateTime via PATCH if we have a timestamp
-    if (timestamp > 0) {
-        auto j = Json::Parse(r.body);
-        std::string itemId = j["id"].str();
-        if (!itemId.empty()) {
-            auto meta = Json::Object();
-            auto fsi = Json::Object();
-            fsi.objVal["lastModifiedDateTime"] = Json::String(UnixToIso8601(timestamp));
-            meta.objVal["fileSystemInfo"] = std::move(fsi);
-            ApiRequest("PATCH", "/v1.0/me/drive/items/" + itemId,
-                       Json::Stringify(meta));
-        }
+    // Upload response contains the item ID -- populate cache and optionally set timestamp.
+    auto j = Json::Parse(r.body);
+    std::string itemId = j["id"].str();
+    if (!itemId.empty()) {
+        std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+        m_itemIdCache[itemPath] = itemId;
+    }
+    if (timestamp > 0 && !itemId.empty()) {
+        auto meta = Json::Object();
+        auto fsi = Json::Object();
+        fsi.objVal["lastModifiedDateTime"] = Json::String(UnixToIso8601(timestamp));
+        meta.objVal["fileSystemInfo"] = std::move(fsi);
+        ApiRequest("PATCH", "/v1.0/me/drive/items/" + itemId,
+                   Json::Stringify(meta));
     }
 
     return true;
@@ -325,22 +358,21 @@ bool OneDriveProvider::SessionUpload(uint32_t accountId, uint32_t appId,
         }
     }
 
-    // If lastBody is empty (final chunk was 202), look up item ID by path
-    // so we can still PATCH the timestamp.
-    if (timestamp > 0) {
+    // Extract item ID for timestamp PATCH and cache.
+    {
         std::string itemId;
-        if (!lastBody.empty()) {
-            auto j = Json::Parse(lastBody);
-            itemId = j["id"].str();
-        }
+        if (!lastBody.empty())
+            itemId = Json::Parse(lastBody)["id"].str();
         if (itemId.empty()) {
             auto lookup = ApiGet(itemPath + "?$select=id");
-            if (lookup.status == 200) {
-                auto lj = Json::Parse(lookup.body);
-                itemId = lj["id"].str();
-            }
+            if (lookup.status == 200)
+                itemId = Json::Parse(lookup.body)["id"].str();
         }
         if (!itemId.empty()) {
+            std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+            m_itemIdCache[itemPath] = itemId;
+        }
+        if (timestamp > 0 && !itemId.empty()) {
             auto meta = Json::Object();
             auto fsi = Json::Object();
             fsi.objVal["lastModifiedDateTime"] = Json::String(UnixToIso8601(timestamp));
@@ -362,10 +394,12 @@ bool OneDriveProvider::DoOneDriveDelete(uint32_t accountId, uint32_t appId,
     auto r = ApiRequest("DELETE", itemPath, "", "");
     if (r.status == 404) {
         LOG("[OneDrive] %s not on OneDrive, nothing to delete", filename.c_str());
+        InvalidateItemId(itemPath);
         return true;
     }
     if (r.status >= 200 && r.status < 300) {
         LOG("[OneDrive] Deleted %s for acct %u app %u", filename.c_str(), accountId, appId);
+        InvalidateItemId(itemPath);
         return true;
     }
     LOG("[OneDrive] Delete '%s' failed: HTTP %d", filename.c_str(), r.status);
@@ -410,181 +444,18 @@ bool OneDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
         }
     };
 
-    auto uploadIndividually = [&](size_t begin, size_t end, std::vector<std::string>& uploaded) {
-        std::vector<std::string> newUploads;
-        for (size_t i = begin; i < end; ++i) {
-            const auto& item = items[i];
-            if (!Upload(item.path, item.data.data(), item.data.size())) {
-                rollbackUploaded(newUploads);
-                return false;
-            }
-            newUploads.push_back(item.path);
-        }
-        uploaded.insert(uploaded.end(), newUploads.begin(), newUploads.end());
-        return true;
-    };
-
-    // OneDrive $batch API: max 20 requests per batch, max 4 MB per request
-    constexpr size_t MAX_BATCH_SIZE = 20;
-    constexpr size_t MAX_ITEM_SIZE = 4 * 1024 * 1024;
-
-    std::vector<std::string> allUploadedPaths;
-
-    for (size_t batchStart = 0; batchStart < items.size(); batchStart += MAX_BATCH_SIZE) {
-        size_t batchEnd = (std::min)(batchStart + MAX_BATCH_SIZE, items.size());
-        size_t batchCount = batchEnd - batchStart;
-
-        auto token = GetAccessToken();
-        if (token.empty()) {
-            rollbackUploaded(allUploadedPaths);
+    // Upload sequentially with rollback on failure.
+    std::vector<std::string> uploaded;
+    for (const auto& item : items) {
+        if (!Upload(item.path, item.data.data(), item.data.size())) {
+            LOG("[OneDriveProvider] UploadBatch: failed on '%s', rolling back %zu uploads",
+                item.path.c_str(), uploaded.size());
+            rollbackUploaded(uploaded);
             return false;
         }
-
-        auto batchObj = Json::Object();
-        auto requestsArr = Json::Array();
-        std::vector<std::string> individuallyUploaded;
-
-        for (size_t i = batchStart; i < batchEnd; ++i) {
-            const auto& item = items[i];
-
-            // Skip items larger than 4MB (would need session upload)
-            if (item.data.size() > MAX_ITEM_SIZE) {
-                LOG("[OneDriveProvider] UploadBatch: item %zu exceeds 4MB, falling back to individual upload",
-                    i - batchStart);
-                if (!Upload(item.path, item.data.data(), item.data.size())) {
-                    rollbackUploaded(individuallyUploaded);
-                    rollbackUploaded(allUploadedPaths);
-                    return false;
-                }
-                individuallyUploaded.push_back(item.path);
-                continue;
-            }
-
-            uint32_t accountId, appId;
-            std::string relFilename;
-            if (!ParsePath(item.path, accountId, appId, relFilename) || relFilename.empty()) {
-                LOG("[OneDriveProvider] UploadBatch: bad path '%s'", item.path.c_str());
-                rollbackUploaded(individuallyUploaded);
-                rollbackUploaded(allUploadedPaths);
-                return false;
-            }
-
-            auto itemPath = BuildItemPath(accountId, appId, relFilename);
-
-            auto reqObj = Json::Object();
-            reqObj.objVal["id"] = Json::String(std::to_string(i - batchStart));
-            reqObj.objVal["method"] = Json::String("PUT");
-            reqObj.objVal["url"] = Json::String(itemPath + "/content");
-
-            auto headersObj = Json::Object();
-            headersObj.objVal["Content-Type"] = Json::String("application/octet-stream");
-            reqObj.objVal["headers"] = std::move(headersObj);
-
-            std::string base64Body;
-            static const char* base64_chars =
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            const uint8_t* bytes = item.data.data();
-            size_t len = item.data.size();
-            
-            base64Body.reserve((len + 2) / 3 * 4);
-            
-            for (size_t j = 0; j < len; ) {
-                uint32_t val = (bytes[j] << 16);
-                if (j + 1 < len) val |= (bytes[j + 1] << 8);
-                if (j + 2 < len) val |= bytes[j + 2];
-                base64Body += base64_chars[(val >> 18) & 0x3F];
-                base64Body += base64_chars[(val >> 12) & 0x3F];
-                base64Body += (j + 1 < len) ? base64_chars[(val >> 6) & 0x3F] : '=';
-                base64Body += (j + 2 < len) ? base64_chars[val & 0x3F] : '=';
-                
-                j += 3;
-                if (j >= len) break;
-            }
-            reqObj.objVal["body"] = Json::String(base64Body);
-
-            requestsArr.arrVal.push_back(std::move(reqObj));
-        }
-
-        if (requestsArr.arrVal.empty()) {
-            LOG("[OneDriveProvider] UploadBatch: all items in chunk exceeded 4MB, handled individually");
-            continue;  // Move to next batch chunk
-        }
-
-        batchObj.objVal["requests"] = std::move(requestsArr);
-        std::string batchJson = Json::Stringify(batchObj);
-
-        HttpResp r;
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            if (attempt > 0) {
-                std::this_thread::sleep_for(std::chrono::seconds(attempt));
-                token = GetAccessToken();
-                if (token.empty()) {
-                    rollbackUploaded(individuallyUploaded);
-                    rollbackUploaded(allUploadedPaths);
-                    return false;
-                }
-            }
-            ThrottleApiCall();
-            r = ApiRequest("POST", "/v1.0/$batch", batchJson);
-            if (!IsRateLimited(r.status, r.body)) break;
-            LOG("[OneDrive] Batch rate limited (attempt %d), backing off %ds",
-                attempt + 1, attempt + 1);
-        }
-
-        if (r.status < 200 || r.status >= 300) {
-            LOG("[OneDriveProvider] UploadBatch failed: HTTP %d body=%s", r.status, r.body.c_str());
-            LOG("[OneDriveProvider] UploadBatch: falling back to individual uploads for %zu files", batchCount);
-            if (!uploadIndividually(batchStart, batchEnd, allUploadedPaths)) {
-                rollbackUploaded(individuallyUploaded);
-                rollbackUploaded(allUploadedPaths);
-                return false;
-            }
-            continue;
-        }
-
-        auto respJson = Json::Parse(r.body);
-        auto responses = respJson["responses"];
-        if (responses.type != Json::Type::Array) {
-            LOG("[OneDriveProvider] UploadBatch: invalid response format");
-            rollbackUploaded(individuallyUploaded);
-            rollbackUploaded(allUploadedPaths);
-            return false;
-        }
-
-        bool fallback = false;
-        for (const auto& resp : responses.arrVal) {
-            int status = (int)resp["status"].number();
-            if (status < 200 || status >= 300) {
-                auto body = resp["body"];
-                LOG("[OneDriveProvider] UploadBatch: request %s failed with status %d body=%s",
-                    resp["id"].str().c_str(), status, Json::Stringify(body).c_str());
-                fallback = true;
-                break;
-            }
-        }
-
-        if (fallback) {
-            LOG("[OneDriveProvider] UploadBatch: falling back to individual uploads for %zu files", batchCount);
-            if (!uploadIndividually(batchStart, batchEnd, allUploadedPaths)) {
-                rollbackUploaded(individuallyUploaded);
-                rollbackUploaded(allUploadedPaths);
-                return false;
-            }
-            continue;
-        }
-
-        for (const auto& path : individuallyUploaded) {
-            allUploadedPaths.push_back(path);
-        }
-        for (size_t i = batchStart; i < batchEnd; ++i) {
-            if (items[i].data.size() <= MAX_ITEM_SIZE) {
-                allUploadedPaths.push_back(items[i].path);
-            }
-        }
-
-        LOG("[OneDriveProvider] UploadBatch: uploaded %zu files", batchCount);
+        uploaded.push_back(item.path);
     }
-
+    LOG("[OneDriveProvider] UploadBatch: uploaded %zu files", items.size());
     return true;
 }
 
@@ -597,23 +468,11 @@ bool OneDriveProvider::Download(const std::string& path,
         return false;
     }
 
-    // Path-based addressing: resolve the item by path to get its ID.
+    // Resolve path to item ID (cached after first lookup).
     auto itemPath = BuildItemPath(accountId, appId, relFilename);
-    auto r = ApiGet(itemPath + "?$select=id");
-    if (r.status == 404) {
-        LOG("[OneDriveProvider] Download: '%s' not found on OneDrive", path.c_str());
-        return false;
-    }
-    if (r.status != 200) {
-        LOG("[OneDriveProvider] Download: lookup failed HTTP %d for %s",
-            r.status, path.c_str());
-        return false;
-    }
-
-    auto j = Json::Parse(r.body);
-    std::string itemId = j["id"].str();
+    std::string itemId = GetOrFetchItemId(itemPath);
     if (itemId.empty()) {
-        LOG("[OneDriveProvider] Download: empty item ID for %s", path.c_str());
+        LOG("[OneDriveProvider] Download: lookup failed for %s", path.c_str());
         return false;
     }
 
@@ -649,8 +508,19 @@ ICloudProvider::ExistsStatus OneDriveProvider::CheckExists(const std::string& pa
         return ExistsStatus::Error;
 
     auto itemPath = BuildItemPath(accountId, appId, relFilename);
+    {
+        std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+        if (m_itemIdCache.count(itemPath)) return ExistsStatus::Exists;
+    }
     auto r = ApiGet(itemPath + "?$select=id");
-    if (r.status == 200) return ExistsStatus::Exists;
+    if (r.status == 200) {
+        std::string id = Json::Parse(r.body)["id"].str();
+        if (!id.empty()) {
+            std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+            m_itemIdCache[itemPath] = id;
+        }
+        return ExistsStatus::Exists;
+    }
     if (r.status == 404) return ExistsStatus::Missing;
     return ExistsStatus::Error;
 }
@@ -725,21 +595,30 @@ bool OneDriveProvider::ListChecked(const std::string& prefix, std::vector<FileIn
     if (appId == kNoAppId) {
         auto folderPath = BuildAccountFolderPath(accountId);
         LOG("[OneDrive] ListChecked (account-wide): looking up folder: %s", folderPath.c_str());
-        auto r = ApiGet(folderPath + "?$select=id");
-        if (r.status == 404) {
-            LOG("[OneDrive] ListChecked: account folder not found (404)");
-            if (outComplete) *outComplete = true;
-            return true;
+        std::string folderId;
+        {
+            std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+            auto it = m_itemIdCache.find(folderPath);
+            if (it != m_itemIdCache.end()) folderId = it->second;
         }
-        if (r.status != 200) {
-            LOG("[OneDrive] ListChecked: account folder lookup failed: HTTP %d", r.status);
-            return false;
-        }
-        auto fj = Json::Parse(r.body);
-        std::string folderId = fj["id"].str();
         if (folderId.empty()) {
-            LOG("[OneDrive] ListChecked: account folder ID empty from response");
-            return false;
+            auto r = ApiGet(folderPath + "?$select=id");
+            if (r.status == 404) {
+                LOG("[OneDrive] ListChecked: account folder not found (404)");
+                if (outComplete) *outComplete = true;
+                return true;
+            }
+            if (r.status != 200) {
+                LOG("[OneDrive] ListChecked: account folder lookup failed: HTTP %d", r.status);
+                return false;
+            }
+            folderId = Json::Parse(r.body)["id"].str();
+            if (folderId.empty()) {
+                LOG("[OneDrive] ListChecked: account folder ID empty from response");
+                return false;
+            }
+            std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
+            m_itemIdCache[folderPath] = folderId;
         }
 
         std::vector<RemoteFile> remoteFiles;

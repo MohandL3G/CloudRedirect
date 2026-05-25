@@ -202,6 +202,7 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupRootFolder(std::str
 
 GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupAccountFolder(uint32_t accountId,
                                                                             std::string* outId) {
+    static constexpr auto kNegativeCacheTTL = std::chrono::minutes(5);
     std::string key = "acct_" + std::to_string(accountId);
     {
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
@@ -209,6 +210,12 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupAccountFolder(uint3
         if (it != m_folders.end()) {
             if (outId) *outId = it->second;
             return LookupStatus::Exists;
+        }
+        auto neg = m_missingFolders.find(key);
+        if (neg != m_missingFolders.end()) {
+            if (std::chrono::steady_clock::now() - neg->second < kNegativeCacheTTL)
+                return LookupStatus::Missing;
+            m_missingFolders.erase(neg);
         }
     }
 
@@ -222,6 +229,9 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupAccountFolder(uint3
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
         m_folders[key] = id;
         if (outId) *outId = id;
+    } else if (status == LookupStatus::Missing) {
+        std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
+        m_missingFolders[key] = std::chrono::steady_clock::now();
     }
     return status;
 }
@@ -229,6 +239,7 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupAccountFolder(uint3
 GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupAppFolder(uint32_t accountId,
                                                                         uint32_t appId,
                                                                         std::string* outId) {
+    static constexpr auto kNegativeCacheTTL = std::chrono::minutes(5);
     std::string key = "app_" + std::to_string(accountId) + "_" + std::to_string(appId);
     {
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
@@ -236,6 +247,12 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupAppFolder(uint32_t 
         if (it != m_folders.end()) {
             if (outId) *outId = it->second;
             return LookupStatus::Exists;
+        }
+        auto neg = m_missingFolders.find(key);
+        if (neg != m_missingFolders.end()) {
+            if (std::chrono::steady_clock::now() - neg->second < kNegativeCacheTTL)
+                return LookupStatus::Missing;
+            m_missingFolders.erase(neg); // expired
         }
     }
 
@@ -249,6 +266,9 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::LookupAppFolder(uint32_t 
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
         m_folders[key] = id;
         if (outId) *outId = id;
+    } else if (status == LookupStatus::Missing) {
+        std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
+        m_missingFolders[key] = std::chrono::steady_clock::now();
     }
     return status;
 }
@@ -329,6 +349,7 @@ std::string GoogleDriveProvider::GetAccountFolder(uint32_t accountId) {
     if (!id.empty()) {
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
         m_folders[key] = id;
+        m_missingFolders.erase(key);
     }
     return id;
 }
@@ -362,6 +383,7 @@ std::string GoogleDriveProvider::GetAppFolder(uint32_t accountId, uint32_t appId
     if (!id.empty()) {
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
         m_folders[key] = id;
+        m_missingFolders.erase(key);
     }
     return id;
 }
@@ -543,7 +565,7 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::FindFileInFolderStatus(
                     " and mimeType!='application/vnd.google-apps.folder'"
                     " and trashed=false";
     auto r = ApiGet("/drive/v3/files?q=" + UrlEncode(q) +
-                    "&fields=files(id,createdTime,size,modifiedTime)&orderBy=createdTime&pageSize=10");
+                    "&fields=files(id,createdTime,size,modifiedTime)&orderBy=modifiedTime desc&pageSize=10");
     if (r.status == 404) {
         InvalidateFolderById(folderId);
         return LookupStatus::Missing;
@@ -555,10 +577,17 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::FindFileInFolderStatus(
         InvalidateFileChild(folderId, name);
         return LookupStatus::Missing;
     }
+    // Keep the most recently modified file (newest data wins in cross-PC races)
     std::string keepId = files[(size_t)0]["id"].str();
     if (files.size() > 1) {
-        LOG("[GDrive] Duplicate file '%s' detected in folder %s (%zu copies); using oldest id=%s and leaving duplicates untouched",
+        LOG("[GDrive] Duplicate file '%s' in folder %s (%zu copies); keeping newest id=%s, deleting rest",
             name.c_str(), folderId.c_str(), files.size(), keepId.c_str());
+        for (size_t i = 1; i < files.size(); ++i) {
+            std::string dupId = files[i]["id"].str();
+            if (!DeleteById(dupId)) {
+                LOG("[GDrive] WARNING: failed to delete duplicate file %s", dupId.c_str());
+            }
+        }
     }
     CacheFileChild(folderId, name, keepId);
     if (outId) *outId = keepId;
@@ -574,7 +603,7 @@ GoogleDriveProvider::DuplicateFileIdsResult GoogleDriveProvider::FindDuplicateFi
                     " and mimeType!='application/vnd.google-apps.folder'"
                     " and trashed=false";
     auto r = ApiGet("/drive/v3/files?q=" + UrlEncode(q) +
-                    "&fields=files(id,createdTime)&orderBy=createdTime&pageSize=100");
+                    "&fields=files(id,modifiedTime)&orderBy=modifiedTime desc&pageSize=100");
     if (r.status == 404) {
         InvalidateFolderById(folderId);
         result.ok = true;
@@ -793,6 +822,11 @@ bool GoogleDriveProvider::Upload(const std::string& path,
     } else {
         existingId = FindFileInFolder(leafName, parentId);
         uploadStatus = UploadOrUpdate(leafName, parentId, data, len, 0, existingId);
+        // Dedup check: delete stale copies if cross-PC race created duplicates.
+        if (uploadStatus == UploadStatus::Success && existingId.empty()) {
+            std::string verifiedId;
+            FindFileInFolderStatus(leafName, parentId, &verifiedId);
+        }
     }
 
     bool ok = uploadStatus == UploadStatus::Success;

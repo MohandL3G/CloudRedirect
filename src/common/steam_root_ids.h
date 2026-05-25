@@ -16,7 +16,7 @@ struct Entry {
     uint32_t    rootId;    // ERemoteStorageFileRoot enum value (platform-specific)
 };
 
-// NOTE: rootId values here are used for tagging files in our cache
+// rootId values are used for tagging files in our cache
 // and for remotecache.vdf repair entries. AutoCloud rule matching
 // uses bareName strings, not numeric IDs.
 
