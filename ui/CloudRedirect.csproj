@@ -11,7 +11,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>steam_logo3.ico</ApplicationIcon>
     <Version>$(ReleaseVersion)</Version>
-    <InformationalVersion>$(ReleaseVersion)+win.$(WindowsRevision)+core.$(CoreGeneration)</InformationalVersion>
+    <!-- User-facing display version (carries the optional pre-release suffix).
+         Read at runtime via AssemblyInformationalVersionAttribute; the build
+         metadata after '+' is stripped for display. -->
+    <InformationalVersion>$(ReleaseVersion)$(ReleasePrerelease)+win.$(WindowsRevision)+core.$(CoreGeneration)</InformationalVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
