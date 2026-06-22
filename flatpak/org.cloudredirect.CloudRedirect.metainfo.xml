@@ -39,6 +39,9 @@
   
   <releases>
     <release version="2.2.0" date="2026-06-16" />
+    <release version="2.1.8" date="2026-06-11" />
+    <release version="2.1.7" date="2026-06-07" />
+    <release version="2.1.6" date="2026-06-06" />
     <release version="2.1.5" date="2026-06-04" />
     <release version="2.1.2" date="2026-06-02" />
     <release version="2.0.4" date="2026-05-15" />

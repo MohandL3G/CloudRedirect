@@ -1935,6 +1935,9 @@ const std::vector<uint8_t>& GetSchema(uint32_t appId) {
     return GetOrCreateLocked(appId).schema;
 }
 
+// Forward decl: defined below, called from StartSession.
+static bool EndSessionLocked(uint32_t appId);
+
 void StartSession(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_mutex);
     // Flush any open session first: native Steam resumes the existing per-app

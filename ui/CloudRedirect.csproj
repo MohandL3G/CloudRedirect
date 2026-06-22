@@ -42,13 +42,19 @@
       <NativeDllDest>$(MSBuildProjectDirectory)\Resources\cloud_redirect.dll</NativeDllDest>
       <NativeCliSource>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\build\Release\cloud_redirect_cli.exe'))</NativeCliSource>
       <NativeCliDest>$(MSBuildProjectDirectory)\Resources\cloud_redirect_cli.exe</NativeCliDest>
+      <Native760Source>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\build\Release\cloud760_tool.exe'))</Native760Source>
+      <Native760Dest>$(MSBuildProjectDirectory)\native\cloud760_tool.exe</Native760Dest>
     </PropertyGroup>
     <MakeDir Directories="$(MSBuildProjectDirectory)\Resources" Condition="!Exists('$(MSBuildProjectDirectory)\Resources')" />
+    <MakeDir Directories="$(MSBuildProjectDirectory)\native" Condition="!Exists('$(MSBuildProjectDirectory)\native')" />
     <Copy SourceFiles="$(NativeDllSource)" DestinationFiles="$(NativeDllDest)"
           Condition="Exists('$(NativeDllSource)')"
           SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(NativeCliSource)" DestinationFiles="$(NativeCliDest)"
           Condition="Exists('$(NativeCliSource)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(Native760Source)" DestinationFiles="$(Native760Dest)"
+          Condition="Exists('$(Native760Source)')"
           SkipUnchangedFiles="true" />
     <ItemGroup Condition="Exists('$(NativeDllDest)')">
       <EmbeddedResource Include="$(NativeDllDest)" LogicalName="cloud_redirect.dll" />
@@ -74,10 +80,10 @@
        32-bit tool from there. This is the same steam_api.dll that
        SteamCloudFileManagerLite ships. -->
   <ItemGroup>
-    <None Remove="native\cloud760_tool.exe" />
-    <None Remove="native\steam_api.dll" />
-    <EmbeddedResource Include="native\cloud760_tool.exe" LogicalName="cloud760_tool.exe" />
-    <EmbeddedResource Include="native\steam_api.dll" LogicalName="steam_api.dll" />
+    <None Remove="native\cloud760_tool.exe" Condition="Exists('native\cloud760_tool.exe')" />
+    <None Remove="native\steam_api.dll" Condition="Exists('native\steam_api.dll')" />
+    <EmbeddedResource Include="native\cloud760_tool.exe" LogicalName="cloud760_tool.exe" Condition="Exists('native\cloud760_tool.exe')" />
+    <EmbeddedResource Include="native\steam_api.dll" LogicalName="steam_api.dll" Condition="Exists('native\steam_api.dll')" />
   </ItemGroup>
 
 </Project>
