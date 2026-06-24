@@ -453,6 +453,20 @@ namespace CloudRedirect.Services.Patching
                     return result.Fail(plErr);
 
                 var resolvedSetup = ResolveSetupPatchOffsets(payload);
+
+                // Payload may be corrupted by a prior CR version; try the embedded copy.
+                if (resolvedSetup == null || resolvedSetup.Length == 0)
+                {
+                    var (recPath, recPayload, recIv) = TryRecoverCorruptedPayload(cachePath);
+                    if (recPath != null)
+                    {
+                        cachePath = recPath;
+                        payload = recPayload;
+                        iv = recIv;
+                        resolvedSetup = ResolveSetupPatchOffsets(payload);
+                    }
+                }
+
                 if (resolvedSetup == null || resolvedSetup.Length == 0)
                     return result.Fail("Could not identify activation patch locations in payload - unsupported version?");
 
@@ -784,6 +798,54 @@ namespace CloudRedirect.Services.Patching
             {
                 Log($"  Deploy failed: {ex.Message}");
                 return null;
+            }
+        }
+
+        // Sideline a corrupted cache file, deploy the embedded payload, and re-decrypt.
+        (string cachePath, byte[] payload, byte[] iv) TryRecoverCorruptedPayload(string oldCachePath)
+        {
+            try
+            {
+                var corruptPath = oldCachePath + ".corrupt";
+                Log("  Payload appears corrupted by a previous version. Attempting recovery...");
+
+                // Sideline the corrupted file (overwrite any prior .corrupt).
+                try
+                {
+                    File.Move(oldCachePath, corruptPath, overwrite: true);
+                    Log($"  Corrupted payload saved to {Path.GetFileName(corruptPath)}");
+                }
+                catch (Exception ex)
+                {
+                    Log($"  Could not rename corrupted payload: {ex.Message}");
+                    return (null, null, null);
+                }
+
+                // Deploy the embedded (clean) payload.
+                var newPath = DeployEmbeddedPayload();
+                if (newPath == null)
+                {
+                    Log("  Recovery failed: no embedded payload available for this Steam build.");
+                    // Restore the original so the user isn't left with nothing.
+                    try { File.Move(corruptPath, oldCachePath, overwrite: true); } catch { }
+                    return (null, null, null);
+                }
+
+                // Read and decrypt the fresh payload.
+                var (payload, iv, err) = ReadAndDecryptPayload(newPath);
+                if (payload == null)
+                {
+                    Log($"  Recovery failed: {err}");
+                    return (null, null, null);
+                }
+
+                Log($"  Recovery succeeded: clean payload deployed ({payload.Length} bytes)");
+                return (newPath, payload, iv);
+            }
+            catch (Exception ex)
+            {
+                Log($"  Recovery failed: {ex.Message}");
+                return (null, null, null);
             }
         }
 
@@ -1326,6 +1388,30 @@ namespace CloudRedirect.Services.Patching
                 }
 
                 var resolved = ResolveCloudRedirectPatchOffsets(afterP123);
+
+                // Payload may be corrupted by a prior CR version; try the embedded copy.
+                if (resolved == null)
+                {
+                    var (recPath, recPayload, recIv) = TryRecoverCorruptedPayload(cachePath);
+                    if (recPath != null)
+                    {
+                        cachePath = recPath;
+                        payload = recPayload;
+                        iv = recIv;
+
+                        // Re-run P1/P2/P3 on the fresh payload.
+                        resolvedPayload = ResolvePayloadPatchOffsets(payload);
+                        afterP123 = payload;
+                        if (resolvedPayload != null)
+                        {
+                            var (p, a, s, e) = ApplyPatches(payload, resolvedPayload);
+                            if (e.Count == 0) afterP123 = p;
+                        }
+
+                        resolved = ResolveCloudRedirectPatchOffsets(afterP123);
+                    }
+                }
+
                 if (resolved == null)
                     return result.Fail("Could not locate CloudRedirect patch sites in payload");
 
