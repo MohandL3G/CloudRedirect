@@ -53,15 +53,10 @@ That's it. Go launch Steam and watch the magic.
 
 ## Usage (Linux)
 
-```bash
-curl -fsSL "https://raw.githubusercontent.com/Deadboy666/h3adcr-b/refs/heads/cr-testbranch/headcrab.sh" | bash
-```
+Edit your SLSsteam config, set DisableCloud to No. 
 
-Followed by 
 
-```bash
-curl -fsSL headcrab.pages.dev/cloudredirect | bash
-```
+```curl -fsSL headcrab.pages.dev | bash```
 
 Open the CloudRedirect app, sign into a provider.
 
