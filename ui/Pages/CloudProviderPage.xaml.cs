@@ -463,23 +463,23 @@ public partial class CloudProviderPage : Page
 
         if (tag == "filebrowser")
         {
-            var tokenPath = TokenPathBox.Text?.Trim();
-            if (string.IsNullOrEmpty(tokenPath))
+            var fbTokenPath = TokenPathBox.Text?.Trim();
+            if (string.IsNullOrEmpty(fbTokenPath))
             {
                 AuthStatus.Text = S.Get("CloudProvider_NoTokenFilePath");
                 AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
                 return;
             }
 
-            var status = preCheckedStatus ?? CheckFilebrowserConfigStatus(tokenPath);
-            AuthStatus.Text = status.Message;
-            AuthIcon.Symbol = status.IsAuthenticated
+            var fbStatus = preCheckedStatus ?? CheckFilebrowserConfigStatus(fbTokenPath);
+            AuthStatus.Text = fbStatus.Message;
+            AuthIcon.Symbol = fbStatus.IsAuthenticated
                 ? Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24
                 : Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
 
             // Also populate the fields from the config if available
-            if (status.IsAuthenticated)
-                LoadFilebrowserConfigIntoFields(tokenPath);
+            if (fbStatus.IsAuthenticated)
+                LoadFilebrowserConfigIntoFields(fbTokenPath);
             return;
         }
 
