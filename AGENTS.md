@@ -58,5 +58,6 @@ Single source of truth: `Version.props` → `<ReleaseVersion>2.2.0</ReleaseVersi
 - **`MINIZ_NO_STDIO`** is defined globally (miniz used for zip I/O without stdio).
 - **Nullable warnings suppressed** in the WPF UI project (CS8600-CS8625) — considered cosmetic.
 - **No tests directory** currently exists on disk. CMakeLists.txt defines test targets guarded by `if(EXISTS tests/...)` so they're silently skipped.
+- **No local builds**: The agent must never build locally. All builds run in GitHub Actions (`.github/workflows/build.yml`) on push, PR, or manual trigger. Make commits and let CI verify compilation. If compilation info is needed, check the CI run or read relevant files for correctness.
 - **CI workflow**: `.github/workflows/build.yml` builds on `windows-latest` via CMake + VS 2022 + .NET 8 on every push/PR/manual trigger, uploading all outputs as artifacts.
 - **No linter / formatter / typecheck** configured at repo level.

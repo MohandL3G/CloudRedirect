@@ -93,7 +93,11 @@ std::string FilebrowserQuantumProvider::ApiUrl(const std::string& endpoint,
     url += endpoint;
     if (!path.empty()) {
         url += "?path=";
-        url += UrlEncode(path);
+        // Strip leading slash — FileBrowser Quantum expects paths relative to root
+        std::string relPath = path;
+        if (!relPath.empty() && relPath.front() == '/')
+            relPath = relPath.substr(1);
+        url += UrlEncode(relPath);
     }
     return url;
 }
@@ -208,9 +212,10 @@ bool FilebrowserQuantumProvider::EnsureDirExists(const std::string& dirPath) {
     }
 
     // Directory doesn't exist — try creating it
+    // Must pass isDir=true so FileBrowser Quantum creates a directory, not a file
     LOG("[FBQuantum] EnsureDirExists: creating %s", dirPath.c_str());
-    std::string createUrl = ApiUrl("/api/resources", dirPath);
-    auto cr = ApiPost(createUrl, "{}", "application/json");
+    std::string createUrl = ApiUrl("/api/resources", dirPath) + "&isDir=true";
+    auto cr = ApiPost(createUrl, "", "");
     if (cr.status == 200 || cr.status == 201 || cr.status == 409) return true;
 
     LOG("[FBQuantum] EnsureDirExists: create failed HTTP %d for %s", cr.status, dirPath.c_str());
@@ -256,7 +261,7 @@ bool FilebrowserQuantumProvider::Upload(const std::string& path,
         return false;
     }
 
-    std::string uploadUrl = ApiUrl("/api/resources", remotePath);
+    std::string uploadUrl = ApiUrl("/api/resources", remotePath) + "&override=true";
     auto r = ApiPost(uploadUrl,
                      std::string(reinterpret_cast<const char*>(data), len),
                      "application/octet-stream");
