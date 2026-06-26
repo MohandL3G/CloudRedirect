@@ -757,13 +757,18 @@ namespace CloudRedirect.Services.Patching
             try
             {
                 var version = SteamDetector.GetSteamVersion(_steamPath);
+                long buildToUse;
                 if (version == null)
                 {
-                    Log("  Embedded payload deploy failed: could not determine Steam version");
-                    return null;
+                    Log("  Could not determine Steam version, deploying newest embedded payload");
+                    buildToUse = SteamDetector.ExpectedSteamVersion;
+                }
+                else
+                {
+                    buildToUse = version.Value;
                 }
 
-                if (!EmbeddedBundledPayload.TryInstall(_steamPath, version.Value, Log))
+                if (!EmbeddedBundledPayload.TryInstall(_steamPath, buildToUse, Log))
                     return null;
 
                 return Fingerprint.GetExpectedCachePath(_steamPath);

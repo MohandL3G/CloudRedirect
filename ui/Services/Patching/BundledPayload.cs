@@ -31,9 +31,21 @@ namespace CloudRedirect.Services.Patching
                 var src = GetBundledPath(steamBuild);
                 if (!File.Exists(src))
                 {
+                    // Exact build not found — try the newest available payload.
+                    foreach (var fallback in SteamDetector.SupportedSteamVersions)
+                    {
+                        var fbSrc = GetBundledPath(fallback);
+                        if (File.Exists(fbSrc))
+                        {
+                            log?.Invoke($"Bundled payload: build {steamBuild} not found, using latest ({fallback})");
+                            src = fbSrc;
+                            goto found;
+                        }
+                    }
                     log?.Invoke($"Bundled payload: not present for build {steamBuild} (looked in {src})");
                     return false;
                 }
+                found:
 
                 if (!Fingerprint.ValidatePayloadFile(src))
                 {
