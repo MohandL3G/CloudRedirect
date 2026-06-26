@@ -397,22 +397,9 @@ namespace CloudRedirect.Services.Patching
 
             var version = SteamDetector.GetSteamVersion(_steamPath);
             if (version == null)
-            {
                 Log("  WARNING: Could not read Steam version from manifest");
-                return result.Fail("Steam version could not be determined. Cannot safely patch.");
-            }
-            if (!SteamDetector.IsSupportedSteamVersion(version.Value))
-            {
-                var supported = string.Join(", ", SteamDetector.SupportedSteamVersions);
-                Log($"  Steam version: {version.Value} (UNSUPPORTED)");
-                Log($"  Supported versions: {supported}");
-                return result.Fail(
-                    $"Steam version mismatch: installed {version.Value}, " +
-                    $"supported {supported}. " +
-                    "Patching an unsupported version risks corrupting steamclient64.dll. " +
-                    "Update CloudRedirect or downgrade Steam.");
-            }
-            Log($"  Steam version: {version.Value} (OK)");
+            else
+                Log($"  Steam version: {version.Value}");
 
             try
             {
@@ -523,22 +510,9 @@ namespace CloudRedirect.Services.Patching
 
             var version = SteamDetector.GetSteamVersion(_steamPath);
             if (version == null)
-            {
                 Log("  WARNING: Could not read Steam version from manifest");
-                return result.Fail("Steam version could not be determined. Cannot safely revert.");
-            }
-            if (!SteamDetector.IsSupportedSteamVersion(version.Value))
-            {
-                var supported = string.Join(", ", SteamDetector.SupportedSteamVersions);
-                Log($"  Steam version: {version.Value} (UNSUPPORTED)");
-                Log($"  Supported versions: {supported}");
-                return result.Fail(
-                    $"Steam version mismatch: installed {version.Value}, " +
-                    $"supported {supported}. " +
-                    "Reverting on an unsupported version risks corrupting steamclient64.dll. " +
-                    "Update CloudRedirect or downgrade Steam.");
-            }
-            Log($"  Steam version: {version.Value} (OK)");
+            else
+                Log($"  Steam version: {version.Value}");
 
             try
             {
@@ -1309,22 +1283,9 @@ namespace CloudRedirect.Services.Patching
 
             var version = SteamDetector.GetSteamVersion(_steamPath);
             if (version == null)
-            {
                 Log("  WARNING: Could not read Steam version from manifest");
-                return result.Fail("Steam version could not be determined. Cannot safely patch.");
-            }
-            if (!SteamDetector.IsSupportedSteamVersion(version.Value))
-            {
-                var supported = string.Join(", ", SteamDetector.SupportedSteamVersions);
-                Log($"  Steam version: {version.Value} (UNSUPPORTED)");
-                Log($"  Supported versions: {supported}");
-                return result.Fail(
-                    $"Steam version mismatch: installed {version.Value}, " +
-                    $"supported {supported}. " +
-                    "Patching an unsupported version risks corrupting steamclient64.dll. " +
-                    "Update CloudRedirect or downgrade Steam.");
-            }
-            Log($"  Steam version: {version.Value} (OK)");
+            else
+                Log($"  Steam version: {version.Value}");
 
             try
             {

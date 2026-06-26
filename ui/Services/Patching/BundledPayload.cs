@@ -26,12 +26,6 @@ namespace CloudRedirect.Services.Patching
         // or the copy fails. Validates the bundled file before installing it.
         public static bool TryInstall(string steamPath, long steamBuild, Action<string> log)
         {
-            if (!SteamDetector.IsSupportedSteamVersion(steamBuild))
-            {
-                log?.Invoke($"Bundled payload: Steam build {steamBuild} not in supported list, refusing");
-                return false;
-            }
-
             try
             {
                 var src = GetBundledPath(steamBuild);
