@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <limits>
 
 class FilebrowserQuantumProvider : public ICloudProvider {
@@ -70,5 +71,5 @@ private:
     std::unique_ptr<IHttpTransport> m_transport;
     std::unique_ptr<ITokenStore> m_tokenStore;
     mutable std::mutex m_mtx;
-    uint64_t m_lastApiCallTick = 0;
+    std::atomic<uint64_t> m_lastApiCallTick{0};
 };

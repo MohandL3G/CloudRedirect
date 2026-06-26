@@ -131,7 +131,7 @@ void FilebrowserQuantumProvider::ThrottleApiCall() {
 
 // ── HTTP helpers with retry ──────────────────────────────────────────────
 
-HttpResp FilebrowserQuantumProvider::ApiGet(const std::string& path) {
+auto FilebrowserQuantumProvider::ApiGet(const std::string& path) -> HttpUtil::HttpResp {
     std::string url = path; // path is already a full URL
     HttpResp lastResp;
     for (int attempt = 0; attempt < 4; ++attempt) {
@@ -149,9 +149,9 @@ HttpResp FilebrowserQuantumProvider::ApiGet(const std::string& path) {
     return lastResp;
 }
 
-HttpResp FilebrowserQuantumProvider::ApiPost(const std::string& path,
-                                              const std::string& body,
-                                              const std::string& contentType) {
+auto FilebrowserQuantumProvider::ApiPost(const std::string& path,
+                                         const std::string& body,
+                                         const std::string& contentType) -> HttpUtil::HttpResp {
     std::string url = path;
     HttpResp lastResp;
     for (int attempt = 0; attempt < 4; ++attempt) {
@@ -170,7 +170,7 @@ HttpResp FilebrowserQuantumProvider::ApiPost(const std::string& path,
     return lastResp;
 }
 
-HttpResp FilebrowserQuantumProvider::ApiDelete(const std::string& path) {
+auto FilebrowserQuantumProvider::ApiDelete(const std::string& path) -> HttpUtil::HttpResp {
     std::string url = path;
     HttpResp lastResp;
     for (int attempt = 0; attempt < 4; ++attempt) {
