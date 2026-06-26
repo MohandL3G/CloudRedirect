@@ -599,7 +599,7 @@ Si omites esto, las partidas se almacenarán localmente en tu carpeta de Steam.<
     <value>Proveedor de nube</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configura tu proveedor de Steam Cloud. Solo Google Drive/OneDrive/Carpeta local por ahora.</value>
+    <value>Configura tu proveedor de Steam Cloud. Compatible con Google Drive, OneDrive, FileBrowser Quantum y carpetas locales.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Proveedor</value>
@@ -703,6 +703,39 @@ Si omites esto, las partidas se almacenarán localmente en tu carpeta de Steam.<
   </data>
   <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
     <value>No se especificó ruta de archivo de token</value>
+  </data>
+  <data name="CloudProvider_FilebrowserQuantum" xml:space="preserve">
+    <value>FileBrowser Quantum</value>
+  </data>
+  <data name="CloudProvider_FbServerUrl" xml:space="preserve">
+    <value>URL del servidor</value>
+  </data>
+  <data name="CloudProvider_FbServerUrlPlaceholder" xml:space="preserve">
+    <value>https://filebrowser.ejemplo.com</value>
+  </data>
+  <data name="CloudProvider_FbApiToken" xml:space="preserve">
+    <value>Token API</value>
+  </data>
+  <data name="CloudProvider_FbApiTokenPlaceholder" xml:space="preserve">
+    <value>Crea un token API en Configuración de FileBrowser</value>
+  </data>
+  <data name="CloudProvider_FbRootPath" xml:space="preserve">
+    <value>Ruta raíz (opcional)</value>
+  </data>
+  <data name="CloudProvider_FbRootPathPlaceholder" xml:space="preserve">
+    <value>ej. /GameSaves/PC</value>
+  </data>
+  <data name="CloudProvider_FbRootPathHint" xml:space="preserve">
+    <value>Si se establece, los datos de CloudRedirect se almacenan bajo esta ruta (ej. /GameSaves/PC/CloudRedirect/...). Déjalo vacío para usar la raíz del servidor.</value>
+  </data>
+  <data name="CloudProvider_FbConfigPathHint" xml:space="preserve">
+    <value>Ruta al archivo de configuración de FileBrowser (generado automáticamente).</value>
+  </data>
+  <data name="CloudProvider_FbConfigured" xml:space="preserve">
+    <value>Configurado para {0}</value>
+  </data>
+  <data name="CloudProvider_FbMissingCredentials" xml:space="preserve">
+    <value>Por favor ingresa la URL del servidor y el Token API.</value>
   </data>
 
   <data name="Apps_Title" xml:space="preserve">
@@ -1411,6 +1444,9 @@ Esto puede causar pérdida de datos en algunos casos.
     <value>Steam debe estar cerrado antes de continuar. Cierra Steam e intenta de nuevo.</value>
   </data>
 
+  <data name="Provider_FilebrowserQuantum" xml:space="preserve">
+    <value>FileBrowser Quantum</value>
+  </data>
   <data name="Provider_GoogleDrive" xml:space="preserve">
     <value>Google Drive</value>
   </data>

@@ -722,6 +722,42 @@ Force-kill it?</value>
   <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
     <value>No token file path specified</value>
   </data>
+  <data name="CloudProvider_FilebrowserQuantum" xml:space="preserve">
+    <value>FileBrowser Quantum</value>
+  </data>
+  <data name="CloudProvider_Description" xml:space="preserve">
+    <value>Configure your Steam Cloud provider. Supports Google Drive, OneDrive, FileBrowser Quantum, and local folders.</value>
+  </data>
+  <data name="CloudProvider_FbServerUrl" xml:space="preserve">
+    <value>Server URL</value>
+  </data>
+  <data name="CloudProvider_FbServerUrlPlaceholder" xml:space="preserve">
+    <value>https://filebrowser.example.com</value>
+  </data>
+  <data name="CloudProvider_FbApiToken" xml:space="preserve">
+    <value>API Token</value>
+  </data>
+  <data name="CloudProvider_FbApiTokenPlaceholder" xml:space="preserve">
+    <value>Create an API token in FileBrowser Settings</value>
+  </data>
+  <data name="CloudProvider_FbRootPath" xml:space="preserve">
+    <value>Root Path (optional)</value>
+  </data>
+  <data name="CloudProvider_FbRootPathPlaceholder" xml:space="preserve">
+    <value>e.g. /GameSaves/PC</value>
+  </data>
+  <data name="CloudProvider_FbRootPathHint" xml:space="preserve">
+    <value>If set, CloudRedirect data is stored under this path (e.g. /GameSaves/PC/CloudRedirect/...). Leave empty to use the server root.</value>
+  </data>
+  <data name="CloudProvider_FbConfigPathHint" xml:space="preserve">
+    <value>Path to the FileBrowser config file (auto-generated).</value>
+  </data>
+  <data name="CloudProvider_FbConfigured" xml:space="preserve">
+    <value>Configured for {0}</value>
+  </data>
+  <data name="CloudProvider_FbMissingCredentials" xml:space="preserve">
+    <value>Please enter both the Server URL and API Token.</value>
+  </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- AppsPage XAML                                                      -->
@@ -1452,6 +1488,9 @@ Are you sure?</value>
   </data>
 
   <!-- CloudConfig.DisplayName -->
+  <data name="Provider_FilebrowserQuantum" xml:space="preserve">
+    <value>FileBrowser Quantum</value>
+  </data>
   <data name="Provider_GoogleDrive" xml:space="preserve">
     <value>Google Drive</value>
   </data>

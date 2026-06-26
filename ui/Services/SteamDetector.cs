@@ -291,6 +291,7 @@ public record CloudConfig(string Provider, string? TokenPath, string? SyncPath)
 {
     public string DisplayName => Provider switch
     {
+        "filebrowser" => S.Get("Provider_FilebrowserQuantum"),
         "gdrive" => S.Get("Provider_GoogleDrive"),
         "onedrive" => S.Get("Provider_OneDrive"),
         "folder" => S.Get("Provider_FolderNetworkDrive"),
@@ -300,4 +301,5 @@ public record CloudConfig(string Provider, string? TokenPath, string? SyncPath)
 
     public bool IsFolder => Provider == "folder";
     public bool IsLocal => Provider == "local";
+    public bool IsFilebrowser => Provider == "filebrowser";
 }

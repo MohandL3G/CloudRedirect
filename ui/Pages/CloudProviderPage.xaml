@@ -27,6 +27,7 @@
                       HorizontalAlignment="Left"
                       Margin="0,0,0,24"
                       SelectionChanged="ProviderCombo_SelectionChanged">
+                <ComboBoxItem Content="{res:Loc CloudProvider_FilebrowserQuantum}" Tag="filebrowser" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_GoogleDrive}" Tag="gdrive" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_OneDrive}" Tag="onedrive" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_FolderMappedDrive}" Tag="folder" />
@@ -60,6 +61,37 @@
                        Foreground="{DynamicResource TextFillColorTertiaryBrush}"
                        TextWrapping="Wrap"
                        Margin="0,0,0,24" />
+
+            <!-- FileBrowser Quantum fields (visible only for this provider) -->
+            <StackPanel x:Name="FilebrowserFields" Visibility="Collapsed" Margin="0,0,0,24">
+                <TextBlock Text="{res:Loc CloudProvider_FbServerUrl}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <ui:TextBox x:Name="FbServerUrlBox"
+                            PlaceholderText="{res:Loc CloudProvider_FbServerUrlPlaceholder}"
+                            Margin="0,0,0,16" />
+
+                <TextBlock Text="{res:Loc CloudProvider_FbApiToken}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <ui:TextBox x:Name="FbApiTokenBox"
+                            PlaceholderText="{res:Loc CloudProvider_FbApiTokenPlaceholder}"
+                            Margin="0,0,0,16" />
+
+                <TextBlock Text="{res:Loc CloudProvider_FbRootPath}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <ui:TextBox x:Name="FbRootPathBox"
+                            PlaceholderText="{res:Loc CloudProvider_FbRootPathPlaceholder}"
+                            Margin="0,0,0,4" />
+                <TextBlock Text="{res:Loc CloudProvider_FbRootPathHint}"
+                           FontSize="11"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
 
             <TextBlock Text="{res:Loc CloudProvider_Authentication}"
                        FontWeight="SemiBold"

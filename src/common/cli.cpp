@@ -781,7 +781,7 @@ static void PrintUsage() {
     fprintf(stderr, "  prune-local-legacy-metadata <cloud_root>  Remove local legacy metadata siblings where safe\n");
     fprintf(stderr, "  publish-full-manifest <provider> <account_id> <app_id> <cloud_root>  Publish local inventory manifest and CN\n");
     fprintf(stderr, "  gc-blobs <provider> <account_id> <app_id> <cloud_root>  Delete unreferenced SHA blobs from cloud\n");
-    fprintf(stderr, "\nProviders: gdrive, onedrive\n");
+    fprintf(stderr, "\nProviders: gdrive, onedrive, filebrowser\n");
 }
 
 int RunCli(int argc, char** argv) {

@@ -82,6 +82,7 @@ set(COMMON_SOURCES
 # ── Platform-specific sources ───────────────────────────────────────────
 
 set(PROVIDER_SOURCES
+    src/providers/filebrowser.cpp
     src/providers/google_drive.cpp
     src/providers/onedrive.cpp
     src/providers/local_disk_provider.cpp

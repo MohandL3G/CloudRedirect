@@ -87,7 +87,12 @@ public partial class CloudProviderPage : Page
 
                 Services.TokenStatus? tokenStatus = null;
                 if (config?.TokenPath != null)
-                    tokenStatus = Services.OAuthService.CheckTokenStatus(config.TokenPath);
+                {
+                    if (config.IsFilebrowser)
+                        tokenStatus = CheckFilebrowserConfigStatus(config.TokenPath);
+                    else
+                        tokenStatus = Services.OAuthService.CheckTokenStatus(config.TokenPath);
+                }
 
                 return new LoadedConfigSnapshot(config, defaultLocal, pathOverride, tokenStatus);
             });
@@ -109,7 +114,7 @@ public partial class CloudProviderPage : Page
         if (snap.Config == null)
         {
             AuthStatus.Text = S.Get("CloudProvider_NoConfigFound");
-            ProviderCombo.SelectedIndex = 3; // Local only
+            ProviderCombo.SelectedIndex = 4; // Local only (after adding filebrowser at index 0)
             if (!string.IsNullOrEmpty(snap.DefaultLocalPath))
                 TokenPathBox.Text = snap.DefaultLocalPath;
             return;
@@ -126,7 +131,7 @@ public partial class CloudProviderPage : Page
 
         if (!string.IsNullOrEmpty(snap.PathTextOverride))
             TokenPathBox.Text = snap.PathTextOverride;
-        else if (snap.Config.IsLocal || snap.Config.IsFolder)
+        else if (snap.Config.IsLocal || snap.Config.IsFolder || snap.Config.IsFilebrowser)
         {
             if (!string.IsNullOrEmpty(snap.DefaultLocalPath))
                 TokenPathBox.Text = snap.DefaultLocalPath;
@@ -172,6 +177,12 @@ public partial class CloudProviderPage : Page
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "CloudRedirect", "onedrive_tokens.json");
             }
+            else if (tag == "filebrowser")
+            {
+                TokenPathBox.Text = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "CloudRedirect", "filebrowser_config.json");
+            }
             else if (tag is "local" or "folder")
             {
                 SetDefaultLocalPath();
@@ -192,14 +203,24 @@ public partial class CloudProviderPage : Page
         bool needsTokens = tag is "gdrive" or "onedrive";
         bool isFolder = tag == "folder";
         bool isLocal = tag == "local";
+        bool isFilebrowser = tag == "filebrowser";
         bool needsPath = needsTokens || isFolder;
 
         TokenPathBox.IsEnabled = needsPath;
         BrowseButton.IsEnabled = needsPath;
         SignInButton.Visibility = needsTokens ? Visibility.Visible : Visibility.Collapsed;
 
+        // Show/hide FileBrowser-specific fields
+        FilebrowserFields.Visibility = isFilebrowser ? Visibility.Visible : Visibility.Collapsed;
+
         // Update labels based on provider type
-        if (isFolder)
+        if (isFilebrowser)
+        {
+            PathLabel.Text = S.Get("CloudProvider_TokenFilePath");
+            TokenPathBox.PlaceholderText = S.Get("CloudProvider_TokenPlaceholder");
+            PathHint.Text = S.Get("CloudProvider_FbConfigPathHint");
+        }
+        else if (isFolder)
         {
             PathLabel.Text = S.Get("CloudProvider_SyncFolderPath");
             TokenPathBox.PlaceholderText = S.Get("CloudProvider_SyncFolderPlaceholder");
@@ -248,6 +269,22 @@ public partial class CloudProviderPage : Page
                 UpdateAuthStatus();
             }
         }
+        else if (provider == "filebrowser")
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = S.Get("CloudProvider_SelectTokenFile"),
+                Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+                CheckFileExists = false,
+                FileName = "filebrowser_config.json"
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                TokenPathBox.Text = dialog.FileName;
+                UpdateAuthStatus();
+            }
+        }
         else
         {
             var dialog = new Microsoft.Win32.OpenFileDialog
@@ -270,7 +307,7 @@ public partial class CloudProviderPage : Page
         if (_isAuthenticating) return;
 
         var provider = GetSelectedProvider();
-        if (provider is "local" or "folder") return;
+        if (provider is "local" or "folder" or "filebrowser") return;
 
         var tokenPath = TokenPathBox.Text?.Trim();
         if (string.IsNullOrEmpty(tokenPath))
@@ -363,6 +400,31 @@ public partial class CloudProviderPage : Page
         if (provider == "local")
             configProvider = "folder";
 
+        // For FileBrowser, write the server_url + api_token + root_path to a DPAPI-encrypted config
+        if (provider == "filebrowser")
+        {
+            var serverUrl = FbServerUrlBox.Text?.Trim() ?? "";
+            var apiToken = FbApiTokenBox.Text?.Trim() ?? "";
+            var rootPath = FbRootPathBox.Text?.Trim() ?? "";
+
+            if (string.IsNullOrEmpty(serverUrl) || string.IsNullOrEmpty(apiToken))
+            {
+                await Services.Dialog.ShowWarningAsync(S.Get("CloudProvider_MissingPath"),
+                    S.Get("CloudProvider_FbMissingCredentials"));
+                return false;
+            }
+
+            // Write DPAPI-encrypted config for the C++ DLL
+            var fbConfig = new
+            {
+                server_url = serverUrl,
+                api_token = apiToken,
+                root_path = rootPath
+            };
+            var fbJson = System.Text.Json.JsonSerializer.Serialize(fbConfig, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            await Task.Run(() => Services.TokenFile.WriteJson(tokenPath, fbJson));
+        }
+
         var configPath = Path.Combine(configDir, "config.json");
 
         try
@@ -398,6 +460,28 @@ public partial class CloudProviderPage : Page
         if (ProviderCombo.SelectedItem is not ComboBoxItem item) return;
 
         var tag = item.Tag as string;
+
+        if (tag == "filebrowser")
+        {
+            var tokenPath = TokenPathBox.Text?.Trim();
+            if (string.IsNullOrEmpty(tokenPath))
+            {
+                AuthStatus.Text = S.Get("CloudProvider_NoTokenFilePath");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
+                return;
+            }
+
+            var status = preCheckedStatus ?? CheckFilebrowserConfigStatus(tokenPath);
+            AuthStatus.Text = status.Message;
+            AuthIcon.Symbol = status.IsAuthenticated
+                ? Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24
+                : Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
+
+            // Also populate the fields from the config if available
+            if (status.IsAuthenticated)
+                LoadFilebrowserConfigIntoFields(tokenPath);
+            return;
+        }
 
         if (tag == "local")
         {
@@ -450,6 +534,54 @@ public partial class CloudProviderPage : Page
         AuthIcon.Symbol = status.IsAuthenticated
             ? Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24
             : Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
+    }
+
+    private static Services.TokenStatus CheckFilebrowserConfigStatus(string configPath)
+    {
+        if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath))
+            return new Services.TokenStatus(false, "No FileBrowser config file found");
+
+        try
+        {
+            var json = Services.TokenFile.ReadJson(configPath);
+            if (json == null)
+                return new Services.TokenStatus(false, "Cannot decrypt FileBrowser config");
+
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var serverUrl = root.TryGetProperty("server_url", out var su) ? su.GetString() ?? "" : "";
+            var apiToken = root.TryGetProperty("api_token", out var at) ? at.GetString() ?? "" : "";
+
+            if (string.IsNullOrEmpty(serverUrl) || string.IsNullOrEmpty(apiToken))
+                return new Services.TokenStatus(false, "Config missing server_url or api_token");
+
+            return new Services.TokenStatus(true, S.Format("CloudProvider_FbConfigured", serverUrl));
+        }
+        catch (Exception ex)
+        {
+            return new Services.TokenStatus(false, $"Cannot read config: {ex.Message}");
+        }
+    }
+
+    private void LoadFilebrowserConfigIntoFields(string configPath)
+    {
+        try
+        {
+            var json = Services.TokenFile.ReadJson(configPath);
+            if (json == null) return;
+
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("server_url", out var su))
+                FbServerUrlBox.Text = su.GetString() ?? "";
+            if (root.TryGetProperty("api_token", out var at))
+                FbApiTokenBox.Text = at.GetString() ?? "";
+            if (root.TryGetProperty("root_path", out var rp))
+                FbRootPathBox.Text = rp.GetString() ?? "";
+        }
+        catch { }
     }
 
     private void AppendLog(string message)
