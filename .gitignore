@@ -9,3 +9,4 @@ flatpak/cloud_redirect.so
 build.ps1
 ui/Resources/cloud_redirect_cli.exe
 ui/Resources/payloads/
+.opencode/
