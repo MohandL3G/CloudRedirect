@@ -99,7 +99,15 @@ std::string FilebrowserQuantumProvider::ApiUrl(const std::string& endpoint,
 }
 
 std::string FilebrowserQuantumProvider::RawUrl(const std::string& path) const {
-    return ApiUrl("/api/raw", path);
+    // /api/raw expects the path as URL path segment, not query parameter
+    std::string url = m_serverUrl;
+    if (!url.empty() && url.back() == '/') url.pop_back();
+    url += "/api/raw";
+    if (!path.empty()) {
+        if (path.front() != '/') url += '/';
+        url += path;
+    }
+    return url;
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────

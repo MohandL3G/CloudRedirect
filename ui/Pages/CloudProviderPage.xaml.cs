@@ -131,10 +131,15 @@ public partial class CloudProviderPage : Page
 
         if (!string.IsNullOrEmpty(snap.PathTextOverride))
             TokenPathBox.Text = snap.PathTextOverride;
-        else if (snap.Config.IsLocal || snap.Config.IsFolder || snap.Config.IsFilebrowser)
+        else if (snap.Config.IsLocal || snap.Config.IsFolder)
         {
             if (!string.IsNullOrEmpty(snap.DefaultLocalPath))
                 TokenPathBox.Text = snap.DefaultLocalPath;
+        }
+        else if (snap.Config.IsFilebrowser)
+        {
+            // TokenPathBox was already set by ProviderCombo_SelectionChanged
+            // via the SelectedIndex assignment above — leave it as is
         }
 
         UpdateProviderUI();
