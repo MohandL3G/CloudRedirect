@@ -1,13 +1,10 @@
 #pragma once
-#include "cloud_provider.h"
+#include "cloud_provider_base.h"
 #include <string>
 #include <vector>
 #include <memory>
 #include <mutex>
 #include <limits>
-
-class IHttpTransport;
-class ITokenStore;
 
 class FilebrowserQuantumProvider : public ICloudProvider {
 public:

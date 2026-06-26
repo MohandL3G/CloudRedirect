@@ -1,6 +1,4 @@
 #include "filebrowser_provider.h"
-#include "cloud_provider_base.h"  // IHttpTransport, ITokenStore, CreateHttpTransport, CreateTokenStore
-#include "http_util.h"
 #include "json.h"
 #include "log.h"
 
@@ -8,8 +6,6 @@
 #include <chrono>
 #include <ctime>
 #include <charconv>
-
-using HttpUtil::HttpResp;
 
 // ── Init / Shutdown / IsAuthenticated ────────────────────────────────────
 
