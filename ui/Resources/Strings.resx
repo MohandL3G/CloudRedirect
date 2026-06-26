@@ -616,7 +616,7 @@ Force-kill it?</value>
     <value>Cloud Provider</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configure your Steam Cloud provider. Google Drive/OneDrive/Local Folder only for now.</value>
+    <value>Configure your Steam Cloud provider. Supports Google Drive, OneDrive, FileBrowser Quantum, and local folders.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Provider</value>
@@ -724,9 +724,6 @@ Force-kill it?</value>
   </data>
   <data name="CloudProvider_FilebrowserQuantum" xml:space="preserve">
     <value>FileBrowser Quantum</value>
-  </data>
-  <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configure your Steam Cloud provider. Supports Google Drive, OneDrive, FileBrowser Quantum, and local folders.</value>
   </data>
   <data name="CloudProvider_FbServerUrl" xml:space="preserve">
     <value>Server URL</value>
