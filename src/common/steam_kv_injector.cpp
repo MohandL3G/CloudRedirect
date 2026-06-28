@@ -31,28 +31,28 @@ static bool QuotaValueLooksValid(uint64_t quota, uint64_t files) {
 
 #ifdef _WIN32
 
-// steamclient64.dll RVAs (IDA image base: 0x138000000)
+// steamclient64.dll RVAs (IDA image base: 0x138000000, build 1782344391)
 
-// Global CSteamEngine* pointer. Same global already used by cloud_intercept.
+// Global CSteamEngine* pointer. Same global used by cloud_intercept.
 // (SC_RVA_GLOBAL_ENGINE = 0x17A70E8 in that module.)
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17C2D08;
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17CC738;
 
-// Offset from *qword_1397A70E8 to the CAppInfoCache instance.
+// Offset from *CSteamEngine to the CAppInfoCache instance.
 // Pattern observed in many callers:
-//   mov rbx, cs:qword_1397A70E8
+//   mov rbx, cs:qword_1397CC738
 //   lea rcx, [rbx + 0xE68]   ; 0xE68 = 3688
 //   call CAppInfoCache::BlockOnInitialization
 static constexpr uintptr_t APPINFOCACHE_OFFSET = 0xE68;
 
-// CAppInfoCache::GetAppInfo(appId) -> appInfo*
-static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x49D9C0;
+// CAppInfoCache::GetAppInfo(cache, appId) -> appInfo*
+static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x4A2370;
 
 // CAppInfoCache::GetSection(appInfo, sectionId) -> KeyValues*
 // sectionId 10 = "ufs"
-static constexpr uintptr_t SC_RVA_GET_SECTION = 0x49FCF0;
+static constexpr uintptr_t SC_RVA_GET_SECTION = 0x4A46A0;
 
 // CAppInfoCache::ReadAppConfigUint64(cache, appId, sectionId, keyName, defaultVal)
-static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x49EA30;
+static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x4A33E0;
 
 // BlockOnInit -- calls CThread::Join off-engine-thread, crashes/deadlocks. Do not call.
 // Cache is already loaded before our RPC handlers run.
@@ -60,22 +60,22 @@ static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x49EA30;
 
 // KeyValues::FindKey(parent, name, bCreate, out)
 // When bCreate=1 creates the key if not present.
-static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xCFA7F0;
+static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xD01190;
 
 // KeyValues::GetUint64(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xCFBB40;
+static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xD024E0;
 
 // KeyValues::GetInt(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xCFB6F0;
+static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xD02090;
 
 // KeyValues::SetUint64(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xCFBDB0;
+static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xD02750;
 
 // KeyValues::SetInt(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xCFBDF0;
+static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xD02790;
 
 // KeyValues::SetString(kv, value) -- sets string value on a KV leaf node
-static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xCFBE30;
+static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xD027D0;
 
 // CAppInfoUpdater::RequestAppInfoUpdate -- not yet wired (offset unconfirmed).
 // Steam's background PICS populates KV on its own schedule; cached values suffice.
@@ -94,7 +94,7 @@ using KvSetIntFn = void (__fastcall*)(void* kvNode, int value);
 using KvSetStringFn = void (__fastcall*)(void* kvNode, const char* value);
 
 struct Resolved {
-    void** globalEnginePtrPtr = nullptr; // address of qword_1397A70E8 (a void**)
+    void** globalEnginePtrPtr = nullptr; // address of qword_1397CC738 (CSteamEngine*)
     GetAppInfoFn     getAppInfo = nullptr;
     GetSectionFn     getSection = nullptr;
     ReadConfigU64Fn  readConfigU64 = nullptr;
@@ -109,6 +109,16 @@ struct Resolved {
 static Resolved g_r;
 static std::atomic<bool> g_ready{false};
 static std::once_flag g_initOnce;
+static Overrides g_overrides;  // pre-resolved addresses (set before Init)
+
+void SetOverrides(const Overrides& ov) {
+    g_overrides = ov;
+}
+
+// Helper: prefer auto-resolved override, fall back to base + hardcoded RVA.
+static uintptr_t OvResolve(uintptr_t override, uintptr_t base, uintptr_t rva) {
+    return override ? override : (base + rva);
+}
 
 // Section ID for "ufs" in the app config KV tree.
 static constexpr uint32_t kSectionUfs = 10;
@@ -132,16 +142,16 @@ bool Init() {
         uintptr_t base = reinterpret_cast<uintptr_t>(hSC);
         LOG("[KvInjector] Init: steamclient64.dll base %p", hSC);
 
-        g_r.globalEnginePtrPtr = reinterpret_cast<void**>(base + SC_RVA_GLOBAL_ENGINE);
-        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(base + SC_RVA_GET_APP_INFO);
-        g_r.getSection    = reinterpret_cast<GetSectionFn>(base + SC_RVA_GET_SECTION);
-        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(base + SC_RVA_READ_CONFIG_U64);
-        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(base + SC_RVA_KV_FIND_KEY);
-        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(base + SC_RVA_KV_GET_UINT64);
-        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(base + SC_RVA_KV_GET_INT);
-        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(base + SC_RVA_KV_SET_UINT64);
-        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(base + SC_RVA_KV_SET_INT);
-        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(base + SC_RVA_KV_SET_STRING);
+        g_r.globalEnginePtrPtr = reinterpret_cast<void**>(OvResolve(g_overrides.globalEngine, base, SC_RVA_GLOBAL_ENGINE));
+        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(OvResolve(g_overrides.getAppInfo, base, SC_RVA_GET_APP_INFO));
+        g_r.getSection    = reinterpret_cast<GetSectionFn>(OvResolve(g_overrides.getSection, base, SC_RVA_GET_SECTION));
+        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(OvResolve(g_overrides.readConfigU64, base, SC_RVA_READ_CONFIG_U64));
+        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(OvResolve(g_overrides.kvFindKey, base, SC_RVA_KV_FIND_KEY));
+        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(OvResolve(g_overrides.kvGetUint64, base, SC_RVA_KV_GET_UINT64));
+        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(OvResolve(g_overrides.kvGetInt, base, SC_RVA_KV_GET_INT));
+        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(OvResolve(g_overrides.kvSetUint64, base, SC_RVA_KV_SET_UINT64));
+        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(OvResolve(g_overrides.kvSetInt, base, SC_RVA_KV_SET_INT));
+        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(OvResolve(g_overrides.kvSetString, base, SC_RVA_KV_SET_STRING));
 
         // Guard against wrong steamclient build -- bad RVA crashes on first call
         MEMORY_BASIC_INFORMATION mbi = {};
@@ -531,8 +541,7 @@ static uintptr_t FindGlobalEnginePtr(uintptr_t textStart, uintptr_t textEnd,
 
     for (size_t i = 8; i + 6 <= len; ++i) {
         if (mem[i] != 0x81) continue;
-        uint8_t modrm = mem[i + 1];
-        if (modrm < 0xC0 || modrm > 0xC7) continue;
+        if (mem[i + 1] < 0xC0 || mem[i + 1] > 0xC7) continue;
         if (mem[i + 2] != 0x88 || mem[i + 3] != 0x0B ||
             mem[i + 4] != 0x00 || mem[i + 5] != 0x00) continue;
 

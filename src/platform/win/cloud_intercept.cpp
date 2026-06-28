@@ -7,6 +7,7 @@
 #include "protobuf.h"
 #include "parental_bypass.h"
 #include "steam_kv_injector.h"
+#include "sc_resolver.h"
 #include "log.h"
 #include "http_server.h"
 #include "vdf.h"
@@ -46,6 +47,11 @@
 namespace AutoCloudScan { std::string GetAppName(const std::string& steamPath, uint32_t appId); }
 
 namespace CloudIntercept {
+
+static ScResolver::ResolvedAddrs g_resolved;
+
+#define SC_RESOLVE(field, rva) \
+    (g_resolved.field ? g_resolved.field : (g_steamClientBase + (rva)))
 
 static void ShutdownImpl();
 static void InstallExitProcessHook();
@@ -97,7 +103,7 @@ static constexpr uint32_t GP_FIELD_OWNER_ID        = 12;  // uint32
 //   a5 ([rsp+28h]) = output depot vector (DLC/shared depots)
 // Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
 // Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
-static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4AC9B0;
+static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4B13A0;
 static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 
 // CProtoBufMsg::BAsyncSend(uint32_t connectionHandle)
@@ -146,53 +152,27 @@ static constexpr uint32_t EMSG_CLIENT_GET_USER_STATS = 818;
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
-// qword_1397A70E8 = global CSteamEngine* pointer
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17C2D08;
+// qword_1397CC738 = global CSteamEngine* pointer
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17CC738;
 // CCMInterface vtable RVA (for validation)
-static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x126C518;
-// sub_138D199E0 = CNetPacket->CProtoBufNetPacket wrapper
-static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCF7960;
-// sub_138D263B0 = CJobMgr::BRouteMsgToJob
-static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD03970;
-// sub_1380EB760 = Release wrapped packet (CProtoBufNetPacket ref-count release)
-static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC010;
+static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x12737D8;
+// sub_138CFEAB0 = CNetPacket->CProtoBufNetPacket wrapper
+static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCFEAB0;
+// sub_138D0A310 = CJobMgr::BRouteMsgToJob
+static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD0A310;
+// sub_1380EC350 = Release wrapped packet (CProtoBufNetPacket ref-count release)
+static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC350;
 
 // CClientUnifiedServiceTransport vtable (RTTI resolves at runtime; RVA is fallback)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1249C10;
+static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1250EA0;
 // protobuf ParseFromArray, 3-arg (msgObj, data, int size)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC5940;
-// sub_138BE7A40 = protobuf SerializeToArray (writes body to raw bytes)
-static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC5D50;
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBCCBC0;
+// sub_138BCCFD0 = protobuf SerializeToArray (writes body to raw bytes)
+static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBCCFD0;
 // CUser playtime state helpers
-static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BB3C0;
-static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CB870;
-static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9CE6A0;
-// Live playtime update -- the write half of CUser's playtime refresh
-// (sub_1389DA1D0), driven from a synthesized response instead of a CM RPC.
-//   sub_1389C7930  = the writer: iterates the parsed Game array, updates
-//                    m_mapTrackingPlaytimeForApp, writes localconfig (sub_1389CB7D0),
-//                    and fires the 1020046 "minutes played changed" UI callback.
-//   sub_138CF07F0  = CProtoBufMsg ctor (zeroes the wrapper)
-//   sub_138CF3390  = CProtoBufMsg init (allocates the inner MessageLite body at [6])
-//   sub_138CF0AA0  = CProtoBufMsg dtor
-//   off_1396C1360  = CPlayer_GetLastPlayedTimes_Response type descriptor
-//   ??_7CProtoBufMsg<...Response> = typed wrapper vtable
-//   off_1396D3F48  = "Software\\Valve\\Steam\\LastPlayedTimesSyncTime" registry key
-// 2.2.x-only playtime RVAs. Values below are stale June-1st offsets; re-resolve
-// for 1781041600 before the playtime-writer path works.
-static constexpr uintptr_t SC_RVA_PLAYTIME_WRITER    = 0x9C79D0;
-static constexpr uintptr_t SC_RVA_MSG_CTOR           = 0xCF1E40;
-static constexpr uintptr_t SC_RVA_MSG_INIT           = 0xCF49E0;
-static constexpr uintptr_t SC_RVA_MSG_DTOR           = 0xCF20F0;
-static constexpr uintptr_t SC_RVA_RESP_DESCRIPTOR    = 0x16C5360;
-static constexpr uintptr_t SC_RVA_RESP_WRAPPER_VT    = 0x1325920;
-// off_1396D7F48: pointer to "Software\\Valve\\Steam\\LastPlayedTimesSyncTime"
-static constexpr uintptr_t SC_RVA_REGKEY_SYNCTIME    = 0x16D7F48;
-// CUser member offsets used by the writer path
-static constexpr uint32_t USER_OFF_REGISTRY          = 3272;   // CUser+0xCC8: registry obj (sync-time write)
-// Inner CPlayer_GetLastPlayedTimes_Response message offsets
-static constexpr uint32_t RESP_OFF_GAMES_COUNT       = 24;     // repeated games: element count
-static constexpr uint32_t RESP_OFF_GAMES_ARRAY       = 32;     // repeated games: array base ptr
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BFA40;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CFEF0;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9D2D20;
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -281,14 +261,64 @@ static_assert(offsetof(JobRouteInfo, flags) == 20, "");
 // This function takes rcx = pointer-to-pointer, reads *rcx to get a pointer,
 // then does InterlockedIncrement64 on that second pointer.
 // RecvPkt calls this with &unk_139797BD8 before calling BRouteMsgToJob.
-static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDBBFD0;
+static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDC2D70;
 // Global that holds the pointer-to-counter for the refcount helper
-static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17B2A18;
-// sub_138D28CD0 = CUtlSortedVector::Find (looks up a CJob by jobId)
-static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD06410;
+static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17B7E38;
+// sub_138D0CDB0 = CUtlSortedVector::Find (looks up a CJob by jobId)
+static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD0CDB0;
+// g_pJobCur (qword_1397E9CC0) - pointer to currently executing CJob on this coroutine
+static constexpr uintptr_t SC_RVA_JOBCUR_GLOBAL      = 0x17E9CC0;
 
 // SEH exception filter for crash diagnostics
 static thread_local uintptr_t s_crashFaultAddr = 0;
+
+// ===== CRASH DIAGNOSTIC TRACE =====
+// High-resolution lock-free trace buffer for diagnosing the BCheckForJobTimeouts
+// use-after-free crash. Captures thread ID, g_pJobCur, sequence number, and
+// microsecond timestamps on every vtable hook entry/exit.
+static std::atomic<uint64_t> g_traceSeq{0};
+static LARGE_INTEGER g_tracePerfFreq;
+static bool g_traceInitialized = false;
+
+static void TraceInit() {
+    QueryPerformanceFrequency(&g_tracePerfFreq);
+    g_traceInitialized = true;
+}
+
+// Cached pointer to g_pJobCur (resolved lazily on first use).
+static uintptr_t* g_pJobCurPtr = nullptr;
+
+// Read g_pJobCur from steamclient64 global. Returns 0 if unavailable.
+static uintptr_t ReadJobCur() {
+    if (!g_pJobCurPtr) return 0;
+    __try {
+        return *g_pJobCurPtr;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+// Get microsecond timestamp since process start
+static uint64_t TraceUsec() {
+    if (!g_traceInitialized) return 0;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (uint64_t)(now.QuadPart * 1000000LL / g_tracePerfFreq.QuadPart);
+}
+
+// Emit a single diagnostic trace line. Format:
+//   [HH:MM:SS] [TRACE] seq=N tid=XXXX us=YYYYY job=ZZZZ event
+// The LOG() macro already serializes via mutex, and this is a crash diagnostic
+// (not a hot loop), so direct LOG() is fine.
+#define DIAG(fmt, ...) do { \
+    uint64_t _seq = g_traceSeq.fetch_add(1, std::memory_order_relaxed); \
+    uint64_t _us  = TraceUsec(); \
+    uintptr_t _jc = ReadJobCur(); \
+    DWORD _tid    = GetCurrentThreadId(); \
+    LOG("[DIAG] seq=%llu tid=%lu us=%llu job=%p " fmt, \
+        _seq, _tid, _us, (void*)_jc, ##__VA_ARGS__); \
+} while(0)
+// ===== END CRASH DIAGNOSTIC TRACE =====
 
 // Forward declarations
 static void InstallServiceMethodHook();
@@ -621,6 +651,18 @@ void SetNamespaceApps(const uint32_t* appIds, uint32_t count,
     g_namespaceApps = std::move(next);
 }
 
+// per-app launch timestamp for internal playtime tracking
+static std::mutex g_launchTimeMutex;
+static std::unordered_map<uint32_t, time_t> g_launchTimes;
+static std::unordered_map<uint32_t, uint64_t> g_launchVdfPlaytime;
+static std::unordered_map<uint32_t, uint64_t> g_launchVdfPlaytime2wks;
+
+static uint32_t ClampToUint32(uint64_t value) {
+    return value > (std::numeric_limits<uint32_t>::max)()
+        ? (std::numeric_limits<uint32_t>::max)()
+        : static_cast<uint32_t>(value);
+}
+
 static uintptr_t FindCurrentUser();
 
 static uintptr_t FindCurrentUser() {
@@ -630,7 +672,7 @@ static uintptr_t FindCurrentUser() {
         g_steamClientBase = (uintptr_t)hSC;
     }
 
-    uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+    uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
     uintptr_t engine = 0;
     __try { engine = *pEngineGlobal; } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
     if (!engine) return 0;
@@ -678,6 +720,98 @@ static uint32_t ReadAccountIdFromUser() {
     return acct;
 }
 
+struct LaunchInfo { time_t launchTime; uint64_t vdfBaseline; uint64_t vdfBaseline2wks; };
+static LaunchInfo PopLaunchInfo(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_launchTimeMutex);
+    LaunchInfo info = {0, 0, 0};
+    auto it = g_launchTimes.find(appId);
+    if (it != g_launchTimes.end()) {
+        info.launchTime = it->second;
+        g_launchTimes.erase(it);
+    }
+    auto it2 = g_launchVdfPlaytime.find(appId);
+    if (it2 != g_launchVdfPlaytime.end()) {
+        info.vdfBaseline = it2->second;
+        g_launchVdfPlaytime.erase(it2);
+    }
+    auto it3 = g_launchVdfPlaytime2wks.find(appId);
+    if (it3 != g_launchVdfPlaytime2wks.end()) {
+        info.vdfBaseline2wks = it3->second;
+        g_launchVdfPlaytime2wks.erase(it3);
+    }
+    return info;
+}
+
+bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2wks) {
+    if (!playtime && !playtime2wks) return false;
+
+    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
+    if (!userPtr) return false;
+
+    auto getData = (GetAppMinutesPlayedDataFn)SC_RESOLVE(getAppMinutesPlayedData, SC_RVA_GET_APP_MINUTES_PLAYED_DATA);
+    auto flushData = (FlushAppMinutesPlayedFn)SC_RESOLVE(flushAppMinutesPlayed, SC_RVA_FLUSH_APP_MINUTES_PLAYED);
+
+    unsigned int* record = nullptr;
+    __try {
+        record = getData((int64_t)userPtr, appId, 1);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Playtime] In-memory restore exception creating record for app %u: code=0x%08lX",
+            appId, GetExceptionCode());
+        return false;
+    }
+    if (!record) {
+        LOG("[Playtime] In-memory restore failed for app %u: no playtime record", appId);
+        return false;
+    }
+
+    uint32_t total32 = ClampToUint32(playtime);
+    uint32_t twoWks32 = ClampToUint32(playtime2wks ? playtime2wks : playtime);
+    uint32_t oldTotal = 0;
+    uint32_t oldTwoWks = 0;
+
+    __try {
+        oldTotal = record[1];
+        oldTwoWks = record[2];
+        if (oldTotal > total32) total32 = oldTotal;
+        if (oldTwoWks > twoWks32) twoWks32 = oldTwoWks;
+        record[1] = total32;
+        record[2] = twoWks32;
+        record[3] = 0;
+        record[4] = 0;
+        record[5] = 0;
+        record[6] = 0;
+        flushData((int64_t)userPtr, appId, record);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Playtime] In-memory restore exception applying record for app %u: code=0x%08lX",
+            appId, GetExceptionCode());
+        return false;
+    }
+
+    LOG("[Playtime] Seeded in-memory playtime for app %u: total %u->%u, 2wks %u->%u",
+        appId, oldTotal, total32, oldTwoWks, twoWks32);
+    return true;
+}
+
+bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed) {
+    if (!lastPlayed) return false;
+
+    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
+    if (!userPtr) return false;
+
+    auto setLastPlayed = (SetAppLastPlayedTimeFn)SC_RESOLVE(setAppLastPlayedTime, SC_RVA_SET_APP_LAST_PLAYED_TIME);
+
+    uint32_t lastPlayed32 = ClampToUint32(lastPlayed);
+    __try {
+        setLastPlayed((int64_t)userPtr, appId, lastPlayed32);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Playtime] In-memory LastPlayed restore exception for app %u: code=0x%08lX",
+            appId, GetExceptionCode());
+        return false;
+    }
+
+    LOG("[Playtime] Seeded in-memory LastPlayed for app %u: %u", appId, lastPlayed32);
+    return true;
+}
 
 // cave replacement buffer globals (still needed for passthrough SteamTools hook)
 
@@ -948,7 +1082,7 @@ static void* FindCCMInterface() {
     uintptr_t ccm = userPtr + USER_OFF_CCMINTERFACE;
 
     // Validate by checking vtable matches CCMInterface::vftable
-    uintptr_t expectedVtable = g_steamClientBase + SC_RVA_CCMINTERFACE_VT;
+    uintptr_t expectedVtable = SC_RESOLVE(ccmInterfaceVtable, SC_RVA_CCMINTERFACE_VT);
     uintptr_t actualVtable = 0;
     __try { actualVtable = *(uintptr_t*)ccm; } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 
@@ -984,7 +1118,7 @@ static void TryFindCCMInterface() {
 
     // Log details for debugging (wrapped in SEH - raw pointer dereferences for diagnostics only)
     __try {
-        uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
         uintptr_t engine = *pEngineGlobal;
         uint32_t handle = *(uint32_t*)(engine + ENGINE_OFF_GLOBAL_HANDLE);
 
@@ -996,12 +1130,12 @@ static void TryFindCCMInterface() {
         LOG("[CCM] WARNING: exception reading engine globals (code=0x%lX)", GetExceptionCode());
     }
 
-    // Resolve BRouteMsgToJob bypass function pointers (computed from base + RVA, no dereferences)
-    g_wrapPacket     = (WrapPacketFn)(g_steamClientBase + SC_RVA_WRAP_PACKET);
-    g_bRouteMsgToJob = (BRouteMsgToJobFn)(g_steamClientBase + SC_RVA_BROUTEMSG);
-    g_releaseWrapped = (ReleaseWrappedFn)(g_steamClientBase + SC_RVA_RELEASE_WRAPPED);
-    g_refCountHelper = (RefCountHelperFn)(g_steamClientBase + SC_RVA_REFCOUNT_HELPER);
-    g_refCountGlobalPtr = (volatile int64_t**)(g_steamClientBase + SC_RVA_REFCOUNT_GLOBAL);
+    // Resolve BRouteMsgToJob bypass function pointers
+    g_wrapPacket     = (WrapPacketFn)SC_RESOLVE(wrapPacket, SC_RVA_WRAP_PACKET);
+    g_bRouteMsgToJob = (BRouteMsgToJobFn)SC_RESOLVE(bRouteMsgToJob, SC_RVA_BROUTEMSG);
+    g_releaseWrapped = (ReleaseWrappedFn)SC_RESOLVE(releaseWrapped, SC_RVA_RELEASE_WRAPPED);
+    g_refCountHelper = (RefCountHelperFn)SC_RESOLVE(refCountHelper, SC_RVA_REFCOUNT_HELPER);
+    g_refCountGlobalPtr = (volatile int64_t**)SC_RESOLVE(refCountGlobal, SC_RVA_REFCOUNT_GLOBAL);
     LOG("[CCM]   WrapPacket=%p BRouteMsgToJob=%p ReleaseWrapped=%p",
         g_wrapPacket, g_bRouteMsgToJob, g_releaseWrapped);
 
@@ -1010,7 +1144,7 @@ static void TryFindCCMInterface() {
         LOG("[CCM]   RefCountHelper=%p RefCountGlobal=%p (*=%p)",
             g_refCountHelper, g_refCountGlobalPtr,
             g_refCountGlobalPtr ? (void*)*g_refCountGlobalPtr : nullptr);
-        uintptr_t engine = *(uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t engine = *(uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
         LOG("[CCM]   CJobMgr (engine+%u)=%p  ConnCtx (ccm+%u)=%p",
             ENGINE_OFF_JOBMGR, (void*)(engine + ENGINE_OFF_JOBMGR),
             CCM_OFF_CONN_CONTEXT, *(void**)((uintptr_t)ccm + CCM_OFF_CONN_CONTEXT));
@@ -1209,7 +1343,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     void* jobMgr = nullptr;
     void* connCtx = nullptr;
     __try {
-        uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
         uintptr_t engine = *pEngineGlobal;
         jobMgr = (void*)(engine + ENGINE_OFF_JOBMGR);
         connCtx = *(void**)((uintptr_t)g_cmInterface + CCM_OFF_CONN_CONTEXT);
@@ -1243,7 +1377,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
         // no-ops on a missing slot but returns 1 (false success), masking a
         // dropped response.
         using FindJobFn = int(__fastcall*)(void* slotMap, void* pJobId);
-        FindJobFn findJob = (FindJobFn)(g_steamClientBase + SC_RVA_FIND_JOB);
+        FindJobFn findJob = (FindJobFn)SC_RESOLVE(findJob, SC_RVA_FIND_JOB);
         int jobSlot = -1;
         bool findJobThrew = false;
         __try {
@@ -1695,9 +1829,14 @@ static std::optional<RpcResult> DispatchCloudRpc(
 static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* methodName,
                                                  void* requestBody, void* responseBody, int* flags) {
     HookGuard guard;
-    if (g_shuttingDown.load(std::memory_order_acquire))
+    const char* safeName4 = methodName ? methodName : "(null)";
+    DIAG("S4-ENTER this=%p method=%s reqBody=%p respBody=%p", thisptr, safeName4, requestBody, responseBody);
+    if (g_shuttingDown.load(std::memory_order_acquire)) {
+        DIAG("S4-EXIT-SHUTDOWN method=%s -> passthrough(yield)", safeName4);
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
+    }
     if (!methodName) {
+        DIAG("S4-EXIT-NULL -> passthrough(yield)");
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
@@ -1754,6 +1893,7 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
     }
 
     if (strncmp(methodName, "Cloud.", 6) != 0) {
+        DIAG("S4-EXIT-NOTCLOUD method=%s -> passthrough(yield)", methodName);
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
@@ -1761,6 +1901,7 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
     bool isSlot4Rpc = (strcmp(methodName, RPC_BEGIN_UPLOAD) == 0 || strcmp(methodName, RPC_COMMIT_UPLOAD) == 0 ||
                        strcmp(methodName, RPC_FILE_DOWNLOAD) == 0 || strcmp(methodName, RPC_DELETE_FILE) == 0);
     if (!isSlot4Rpc) {
+        DIAG("S4-EXIT-NOTOURS method=%s -> passthrough(yield)", methodName);
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
@@ -1792,10 +1933,43 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
     }
 
     if (!isNamespace) {
+        DIAG("S4-EXIT-NOTNS method=%s app=%u -> passthrough(yield)", methodName, appId);
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
+    // FileDownload: call original first (yields), then patch response with our URL.
+    if (strcmp(methodName, RPC_FILE_DOWNLOAD) == 0) {
+        DIAG("S4-CALLORIG method=%s app=%u -> yielding to Valve", methodName, appId);
+        bool origResult = g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
+        DIAG("S4-ORIGRET method=%s app=%u result=%d -> patching", methodName, appId, origResult);
+        LOG("[Slot4] FileDownload app=%u: original returned %d, patching response", realAppId, origResult);
+
+        auto dispatched = DispatchCloudRpc(methodName, realAppId, innerFields);
+        if (!dispatched.has_value()) {
+            return origResult;
+        }
+        auto& result = *dispatched;
+
+        if (responseBody && result.body.Size() > 0) {
+            if (!ParseBytesToBody(responseBody, result.body.Data().data(), result.body.Size())) {
+                LOG("[Slot4] FileDownload: ParseFromArray failed, keeping original response");
+                return origResult;
+            }
+        }
+        if (flags) {
+            flags[2] = 1;
+            flags[3] = result.eresult;
+            flags[4] = 0;
+        }
+        DIAG("S4-EXIT-PATCHED method=%s app=%u eresult=%d bodyLen=%zu",
+             methodName, realAppId, result.eresult, result.body.Size());
+        LOG("[Slot4] FileDownload app=%u: patched (eresult=%d, %zu bytes)",
+            realAppId, result.eresult, result.body.Size());
+        return true;
+    }
+
     // NAMESPACE APP: handle locally, synchronously
+    DIAG("S4-INTERCEPT method=%s app=%u reqLen=%zu", methodName, appId, reqBytes.size());
     LOG("[Slot4] INTERCEPT %s app=%u (%zu bytes):", methodName, appId, reqBytes.size());
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[Slot4-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
@@ -1832,6 +2006,8 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
         flags[4] = 0;  // error_message = "" (null terminator)
     }
 
+    DIAG("S4-EXIT-SYNC method=%s app=%u eresult=%d bodyLen=%zu -> return true (NO YIELD)",
+         methodName, realAppId, result.eresult, result.body.Size());
     LOG("[Slot4] %s handled synchronously", methodName);
     return true;
 }
@@ -1891,9 +2067,14 @@ static void SpyLogChangelistResponse(const char* tag, uint32_t appId,
 static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                                            void* request, void* response, int64_t* flags) {
     HookGuard guard;
-    if (g_shuttingDown.load(std::memory_order_acquire))
+    const char* safeName = methodName ? methodName : "(null)";
+    DIAG("S5-ENTER this=%p method=%s req=%p resp=%p", thisptr, safeName, request, response);
+    if (g_shuttingDown.load(std::memory_order_acquire)) {
+        DIAG("S5-EXIT-SHUTDOWN method=%s -> passthrough", safeName);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
+    }
     if (!methodName) {
+        DIAG("S5-EXIT-NULL method -> passthrough");
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
@@ -2012,6 +2193,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     // --------------------------------------------------------------------------
 
     if (strncmp(methodName, "Cloud.", 6) != 0) {
+        DIAG("S5-EXIT-NOTCLOUD method=%s -> passthrough(yield)", methodName);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
@@ -2028,10 +2210,12 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                        strcmp(methodName, RPC_EXIT_SYNC) == 0 || strcmp(methodName, RPC_CONFLICT) == 0 ||
                        strcmp(methodName, RPC_TRANSFER_REPORT) == 0);
     if (!isCloudRpc) {
+        DIAG("S5-EXIT-NOTOURS method=%s -> passthrough(yield)", methodName);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
     if (!request || !response) {
+        DIAG("S5-EXIT-NULLARG method=%s req=%p resp=%p -> passthrough(yield)", methodName, request, response);
         LOG("[VtHook] %s: null request/response, passing through", methodName);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
@@ -2069,8 +2253,10 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     if (!isNamespace) {
         // Not a namespace app - pass through to real Steam servers
         // Suppress log for high-frequency non-namespace apps (e.g. 2371090 = Steam Game Notes)
-        if (appId != 2371090)
+        if (appId != 2371090) {
+            DIAG("S5-EXIT-NOTNS method=%s app=%u -> passthrough(yield)", methodName, appId);
             LOG("[VtHook] %s app=%u: not namespace, passing through", methodName, appId);
+        }
 
         // Native Cloud spy (see g_spyAppId): capture native request + response.
         // Read-only.
@@ -2078,8 +2264,6 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
             LOG("[SPY] %s app=%u native request (%zu bytes):", methodName, appId, reqBytes.size());
             SpyLogFields("[SPY-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
             bool spyResult = g_originalSlot5(thisptr, methodName, request, response, flags);
-            // Inspect the response body only on success: a failed call may leave the
-            // body slot without a constructed message.
             void* spyRespBody = spyResult ? *(void**)((uintptr_t)response + 48) : nullptr;
             if (spyRespBody) {
                 auto respBytes = SerializeBodyToBytes(spyRespBody);
@@ -2093,8 +2277,47 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
             }
             return spyResult;
         }
-
         return g_originalSlot5(thisptr, methodName, request, response, flags);
+    }
+
+    // FileDownload: call original first (yields), then patch response with our URL.
+    if (strcmp(methodName, RPC_FILE_DOWNLOAD) == 0) {
+        DIAG("S5-CALLORIG method=%s app=%u -> yielding to Valve", methodName, appId);
+        bool origResult = g_originalSlot5(thisptr, methodName, request, response, flags);
+        DIAG("S5-ORIGRET method=%s app=%u result=%d -> patching", methodName, appId, origResult);
+        LOG("[VtHook] FileDownload app=%u: original returned %d, patching response", realAppId, origResult);
+
+        auto dispatched = DispatchCloudRpc(methodName, realAppId, innerFields);
+        if (!dispatched.has_value()) {
+            return origResult;
+        }
+        auto& result = *dispatched;
+
+        void* respHeader = *(void**)((uintptr_t)response + 40);
+        void* respBody = *(void**)((uintptr_t)response + 48);
+        if (!respHeader || !respBody) {
+            LOG("[VtHook] FileDownload: null respHeader/respBody, keeping original");
+            return origResult;
+        }
+
+        if (result.body.Size() > 0) {
+            if (!ParseBytesToBody(respBody, result.body.Data().data(), result.body.Size())) {
+                LOG("[VtHook] FileDownload: ParseFromArray failed, keeping original");
+                return origResult;
+            }
+        }
+        SEH_WriteResponseHeader(respHeader, result.eresult);
+        if (flags) {
+            int32_t* f32 = reinterpret_cast<int32_t*>(flags);
+            f32[0] = 0;
+            f32[2] = 0;
+            f32[3] = result.eresult;
+        }
+        DIAG("S5-EXIT-PATCHED method=%s app=%u eresult=%d bodyLen=%zu",
+             methodName, realAppId, result.eresult, result.body.Size());
+        LOG("[VtHook] FileDownload app=%u: patched (eresult=%d, %zu bytes)",
+            realAppId, result.eresult, result.body.Size());
+        return true;
     }
 
     // NAMESPACE APP: handle locally
@@ -2220,6 +2443,8 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         f32[3] = result.eresult;
     }
 
+    DIAG("S5-EXIT-SYNC method=%s app=%u eresult=%d bodyLen=%zu -> return true (NO YIELD)",
+         methodName, realAppId, result.eresult, result.body.Size());
     LOG("[VtHook] SUCCESS: %s app=%u handled locally (response %zu bytes)",
         methodName, realAppId, result.body.Size());
     return true;
@@ -2259,6 +2484,7 @@ static uint32_t CheckNotificationNamespaceApp(const char* methodName, void* body
 // request is a CProtoBufMsg* with body at +48, header at +40
 static bool __fastcall NotificationWrapperHook(void* thisptr, const char* methodName, void* request) {
     HookGuard guard;
+    DIAG("S8-ENTER this=%p method=%s", thisptr, methodName ? methodName : "(null)");
     if (g_shuttingDown.load(std::memory_order_acquire))
         return g_originalSlot8(thisptr, methodName, request);
     if (!methodName) {
@@ -2364,6 +2590,7 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
 // bodyObj is the raw protobuf body (NOT wrapped in CProtoBufMsg)
 static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodName, void* bodyObj, int* flags) {
     HookGuard guard;
+    DIAG("S7-ENTER this=%p method=%s", thisptr, methodName ? methodName : "(null)");
     if (g_shuttingDown.load(std::memory_order_acquire))
         return g_originalSlot7(thisptr, methodName, bodyObj, flags);
     if (!methodName) {
@@ -2587,18 +2814,30 @@ static void RefuseVtableHook(const char* reasonFmt, ...) {
 
     if (g_vtableHookFailureNotified.exchange(true)) return;
 
-    std::string msg =
-        "CloudRedirect could not install its primary cloud-save interception hook.\n\n"
-        "Most likely a Steam update changed steamclient64.dll layout.\n\n"
-        "Cloud saves may not be redirected for some games.\n\n"
-        "Please report cloud_redirect.log at\n"
-        "https://github.com/anomalyco/CloudRedirect/issues\n\n"
-        "Reason: ";
-    msg += reason;
-    std::thread t([msg]() {
+    uint64_t ver = g_detectedSteamVersion.load(std::memory_order_relaxed);
+    char msg[1024];
+    if (ver != 0) {
+        snprintf(msg, sizeof(msg),
+            "Your Steam client (version %llu) is newer than what "
+            "CloudRedirect supports.\n\n"
+            "Update CloudRedirect to match your Steam version.\n\n"
+            "Cloud saves will not be redirected. STFixer patches will still apply.\n\n"
+            "Reason: %s",
+            ver, reason);
+    } else {
+        snprintf(msg, sizeof(msg),
+            "CloudRedirect could not identify required addresses in "
+            "steamclient64.dll.\n\n"
+            "Update CloudRedirect to match your Steam version.\n\n"
+            "Cloud saves will not be redirected. STFixer patches will still apply.\n\n"
+            "Reason: %s",
+            reason);
+    }
+    std::string msgStr(msg);
+    std::thread t([msgStr]() {
         if (g_shuttingDown.load(std::memory_order_acquire)) return;
-        MessageBoxA(nullptr, msg.c_str(),
-            "CloudRedirect -- Hook Install Failed",
+        MessageBoxA(nullptr, msgStr.c_str(),
+            "CloudRedirect -- Incompatible Steam Update",
             MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
     });
     std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
@@ -2625,20 +2864,35 @@ static void InstallServiceMethodHook() {
     InstallServiceMethodHookLocked();
 }
 
+static std::atomic<bool> g_resolverRan{false};
+
+static void RunAutoResolver() {
+    if (g_resolverRan.exchange(true)) return; // one-shot
+    g_resolved = ScResolver::Resolve(g_steamClientBase);
+    ScResolver::LogComparison(g_resolved, g_steamClientBase);
+}
+
 static void InstallServiceMethodHookLocked() {
     if (g_vtableHookInstalled.load(std::memory_order_acquire) || !g_steamClientBase) return;
 
-    // Validate Parse/Serialize RVAs before relying on them; a Steam update can repoint these into garbage.
-    auto candidateParse     = (ParseFromArrayFn)(g_steamClientBase + SC_RVA_PARSE_FROM_ARRAY);
-    auto candidateSerialize = (SerializeToArrayFn)(g_steamClientBase + SC_RVA_SERIALIZE_TO_ARRAY);
+    // Run auto-resolver on first entry (logs comparison with hardcoded RVAs)
+    RunAutoResolver();
+
+    // Resolve g_pJobCur pointer for crash diagnostics (once)
+    // Use auto-resolved address if available, otherwise fall back to hardcoded RVA
+    if (!g_pJobCurPtr) {
+        g_pJobCurPtr = (uintptr_t*)SC_RESOLVE(jobCurGlobal, SC_RVA_JOBCUR_GLOBAL);
+    }
+
+    // Resolve Parse/Serialize
+    auto candidateParse     = (ParseFromArrayFn)SC_RESOLVE(parseFromArray, SC_RVA_PARSE_FROM_ARRAY);
+    auto candidateSerialize = (SerializeToArrayFn)SC_RESOLVE(serializeToArray, SC_RVA_SERIALIZE_TO_ARRAY);
     if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateParse))) {
-        RefuseVtableHook("ParseFromArray RVA 0x%X does not point at a function prologue (Steam update?)",
-            (unsigned)SC_RVA_PARSE_FROM_ARRAY);
+        RefuseVtableHook("ParseFromArray does not point at a function prologue (Steam update?)");
         return;
     }
     if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateSerialize))) {
-        RefuseVtableHook("SerializeToArray RVA 0x%X does not point at a function prologue (Steam update?)",
-            (unsigned)SC_RVA_SERIALIZE_TO_ARRAY);
+        RefuseVtableHook("SerializeToArray does not point at a function prologue (Steam update?)");
         return;
     }
     g_parseFromArray   = candidateParse;
@@ -2706,17 +2960,17 @@ static void InstallServiceMethodHookLocked() {
             }
         }
         if (!vtableEa) {
-            const uintptr_t fallback = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT;
+            const uintptr_t fallback = SC_RESOLVE(serviceTransportVtable, SC_RVA_SERVICE_TRANSPORT_VT);
             uintptr_t slot0 = 0;
             __try { slot0 = *reinterpret_cast<uintptr_t*>(fallback); }
             __except (EXCEPTION_EXECUTE_HANDLER) { slot0 = 0; }
             if (slot0 && LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(slot0))) {
-                LOG("[VtHook] RTTI resolution failed, falling back to hardcoded RVA 0x%X -> %p",
-                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)fallback);
+                LOG("[VtHook] RTTI resolution failed, falling back to resolved/hardcoded RVA -> %p",
+                    (void*)fallback);
                 vtableEa = fallback;
             } else {
-                RefuseVtableHook("RTTI walk + hardcoded RVA 0x%X both failed (slot0=%p not a function prologue) -- Steam update?",
-                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)slot0);
+                RefuseVtableHook("RTTI walk + resolved/hardcoded RVA both failed (slot0=%p not a function prologue) -- Steam update?",
+                    (void*)slot0);
                 return;
             }
         }
@@ -3034,6 +3288,7 @@ static void TryInjectSchemaInto819(CNetPacket* pkt) {
 // RecvPkt monitor hook (logging + Approach D injection drain)
 static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     HookGuard guard;
+    DIAG("RECV-ENTER this=%p pkt=%p", thisptr, (void*)pkt);
     if (g_shuttingDown.load(std::memory_order_acquire))
         return g_originalRecvPkt(thisptr, pkt);
     // Drain on the network-recv thread (valid Coroutine_Continue TLS).
@@ -3680,7 +3935,7 @@ static void UploadLuaOnShutdown() {
 }
 
 // Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.
-static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1781041600ULL, 1780352834ULL, 1779918128ULL, 1779486452ULL, 1778281814ULL };
+static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1782437068ULL, 1782428855ULL, 1782344391ULL, 1782257239ULL, 1781041600ULL, 1780352834ULL, 1779918128ULL, 1779486452ULL, 1778281814ULL, 1778003620ULL };
 
 static bool IsSupportedSteamVersion(uint64_t v) {
     for (uint64_t s : SUPPORTED_STEAM_VERSIONS)
@@ -4139,17 +4394,17 @@ static void TryAutoUpdateDll() {
 }
 
 void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCallback) {
+    TraceInit();
     g_notifyCallback = notifyCallback;
     g_steamPath = steamPath;
     if (!g_steamPath.empty() && g_steamPath.back() != '\\')
         g_steamPath += '\\';
 
-    // Read Steam version early (used by version gate below and auto-update).
+    // Read Steam version for diagnostics and auto-update.
     uint64_t detectedVersion = ReadSteamVersion(g_steamPath);
     g_detectedSteamVersion.store(detectedVersion, std::memory_order_relaxed);
-    bool versionOk = (detectedVersion != 0) && IsSupportedSteamVersion(detectedVersion);
     if (detectedVersion != 0)
-        LOG("Steam version: %llu (%s)", detectedVersion, versionOk ? "OK" : "UNSUPPORTED");
+        LOG("Steam version: %llu", detectedVersion);
     else
         LOG("Steam version: UNKNOWN (manifest unreadable)");
 
@@ -4308,58 +4563,6 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     }
 
     LOG("cloud_redirect=%d", g_cloudRedirectEnabled.load());
-
-    // Steam version gate (after config read so we know the mode).
-    if (!versionOk && !cloudSaveOnly) {
-        bool isCloudMode = g_cloudRedirectEnabled.load();
-        if (isCloudMode) {
-            // CloudRedirect mode: block cloud init, but STFixer still works.
-            if (detectedVersion == 0) {
-                LOG("FATAL: Could not read Steam version from manifest");
-                NotifyUser(CR_NOTIFY_ERROR, "CloudRedirect -- Version Unknown",
-                    "CloudRedirect could not determine the installed Steam version.\n\n"
-                    "CloudRedirect cannot activate. STFixer patches will still apply.");
-            } else {
-                constexpr uint64_t newestSupported = SUPPORTED_STEAM_VERSIONS[0];
-                bool steamIsNewer = detectedVersion > newestSupported;
-                LOG("FATAL: Steam version mismatch! supported_newest=%llu actual=%llu (%s)",
-                    newestSupported, detectedVersion,
-                    steamIsNewer ? "Steam is newer" : "Steam is older");
-                char msg[512];
-                if (steamIsNewer) {
-                    snprintf(msg, sizeof(msg),
-                        "Your Steam client (version %llu) is newer than what "
-                        "CloudRedirect supports (version %llu).\n\n"
-                        "Update CloudRedirect to match your Steam version.\n\n"
-                        "CloudRedirect cannot activate. STFixer patches will still apply.",
-                        detectedVersion, newestSupported);
-                } else {
-                    snprintf(msg, sizeof(msg),
-                        "Your Steam client (version %llu) is older than what "
-                        "CloudRedirect expects (version %llu).\n\n"
-                        "Update Steam to match your CloudRedirect version.\n\n"
-                        "CloudRedirect cannot activate. STFixer patches will still apply.",
-                        detectedVersion, newestSupported);
-                }
-                NotifyUser(CR_NOTIFY_ERROR, "CloudRedirect -- Version Mismatch", msg);
-            }
-            return;  // block cloud init, STFixer patches already applied by payload
-        } else {
-            // STFixer mode: warn once, continue.
-            std::string flagPath = cloudRoot + ".version_warned_" + std::to_string(detectedVersion);
-            if (!std::filesystem::exists(FileUtil::Utf8ToPath(flagPath))) {
-                MessageBoxA(nullptr,
-                    "CloudRedirect is not fully compatible with your Steam client version.\n\n"
-                    "STFixer patches should still work, but consider updating CloudRedirect.\n\n"
-                    "This message will only be shown once.",
-                    "CloudRedirect -- Update Available",
-                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
-                // Write flag so we don't show again
-                std::ofstream(FileUtil::Utf8ToPath(flagPath)) << "1";
-            }
-            LOG("Steam version unsupported but STFixer mode -- continuing with warning");
-        }
-    }
 
     if (!g_cloudRedirectEnabled.load()) {
         LOG("Cloud redirection disabled, skipping cloud init");
@@ -4654,11 +4857,24 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     CloudStorage::Init(cloudRoot, std::move(provider));
     g_startupMetadataScheduled.store(false);
 
+    // Pass auto-resolved addresses to KV injector before Init
+    {
+        SteamKvInjector::Overrides ov;
+        ov.globalEngine  = g_resolved.globalEngine;
+        ov.getAppInfo    = g_resolved.getAppInfo;
+        ov.getSection    = g_resolved.getSection;
+        ov.readConfigU64 = g_resolved.readConfigU64;
+        ov.kvFindKey     = g_resolved.kvFindKey;
+        ov.kvGetUint64   = g_resolved.kvGetUint64;
+        ov.kvGetInt      = g_resolved.kvGetInt;
+        ov.kvSetUint64   = g_resolved.kvSetUint64;
+        ov.kvSetInt      = g_resolved.kvSetInt;
+        ov.kvSetString   = g_resolved.kvSetString;
+        SteamKvInjector::SetOverrides(ov);
+    }
+
     // Native stats / playtime store (cloud-backed). Must come after CloudStorage.
-    // Stats sync as one account-wide blob at <accountId>/0/stats.json (appId ->
-    // stats JSON), not one blob per app (a Drive round-trip per app at startup).
     StatsStore::SetCloudProvider(
-        // pullAll: one download of the account blob, split into per-app entries.
         [](std::unordered_map<uint32_t, std::string>& out) -> bool {
             uint32_t accountId = GetAccountId();
             if (accountId == 0) return false;
@@ -4666,7 +4882,7 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
             if (!CloudStorage::DownloadCloudMetadataWithLegacyFallback(
                     accountId, CloudIntercept::kAccountScopeAppId, "stats.json",
                     nullptr, data) || data.empty())
-                return true;  // no account blob yet -> empty (not a failure)
+                return true;
             Json::Value root = Json::Parse(
                 std::string(reinterpret_cast<const char*>(data.data()), data.size()));
             if (root.type != Json::Type::Object) return true;
@@ -4677,19 +4893,11 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
             }
             return true;
         },
-        // pushAll: RMW-merge our snapshot onto the live blob (don't clobber
-        // another device) and upload once; skip if nothing changed.
         [](const std::unordered_map<uint32_t, std::string>& all) {
-            // This runs on a detached worker (off Steam's net thread). Register
-            // with the in-flight drain so CloudStorage::Shutdown waits for the
-            // provider read below before tearing g_provider down (UAF guard).
             CloudStorage::InflightSyncScope guard;
             if (!guard.entered) return;
-
             uint32_t accountId = GetAccountId();
             if (accountId == 0) return;
-
-            // Read the current account blob as the merge base.
             Json::Value root = Json::Object();
             std::vector<uint8_t> cur;
             if (CloudStorage::DownloadCloudMetadataWithLegacyFallback(
@@ -4699,12 +4907,6 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                     std::string(reinterpret_cast<const char*>(cur.data()), cur.size()));
                 if (parsed.type == Json::Type::Object) root = std::move(parsed);
             }
-
-            // Overlay our app entries (already content-merged in the store).
-            // Fold each onto the live cloud entry (monotonic playtime, union
-            // achievements/stats) instead of replacing it, so a stale/lower copy
-            // can't clobber a higher value another device wrote after our startup
-            // pull -- the account-blob RMW mirror of the WriteAppStats guard.
             bool changed = false;
             for (const auto& [appId, json] : all) {
                 if (appId == 0) continue;
@@ -4719,13 +4921,11 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                     changed = true;
                 }
             }
-            if (!changed) return;  // nothing to write
-
+            if (!changed) return;
             std::string merged = Json::Stringify(root);
             CloudStorage::UploadCloudMetadataTextAsync(
                 accountId, CloudIntercept::kAccountScopeAppId, "stats.json", merged);
         },
-        // pullLegacy: read one app's old per-app blob for migration into the account blob.
         [](uint32_t appId) -> std::string {
             CloudStorage::InflightSyncScope guard;
             if (!guard.entered) return std::string();
@@ -4737,7 +4937,6 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                 return std::string(reinterpret_cast<const char*>(data.data()), data.size());
             return std::string();
         },
-        // pullLegacyPlaytime: read one app's first-format Playtime/<appId>.bin from cloud.
         [](uint32_t appId) -> std::string {
             CloudStorage::InflightSyncScope guard;
             if (!guard.entered) return std::string();
@@ -4748,25 +4947,14 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                 return std::string(reinterpret_cast<const char*>(data.data()), data.size());
             return std::string();
         });
-    // Restrict all playtime/stats tracking to namespace/lua apps only -- real
-    // owned games must never have their playtime recorded or synced.
     StatsHandlers::SetNamespacePredicate([](uint32_t appId) { return IsNamespaceApp(appId); });
-    // Resolve current accountId lazily so the store can import Steam's native
-    // UserGameStats blobs (appcache\stats\UserGameStats_<accountId>_<appId>.bin).
     StatsStore::SetAccountIdProvider([]() -> uint32_t { return GetAccountId(); });
     StatsStore::SetNamespacePredicate([](uint32_t appId) { return IsNamespaceApp(appId); });
-    // On import, refresh schema from Steam (forceRefresh detects new achievements;
-    // deduped per app per session by g_schemaFetchAttempted).
     StatsStore::SetSchemaMissingCallback([](uint32_t appId) {
         std::thread([appId] { RequestSchemaForApp(appId, true); }).detach();
     });
     StatsStore::Init(cloudRoot, g_steamPath);
     StatsHandlers::Init();
-    // Only seed when a stats feature is enabled: SeedApps also uploads imported
-    // stats, so with both off it must stay inert (no cloud reads or writes).
-    // Run on a background thread: SeedApps does a cloud read per app, which on the
-    // init thread would block Steam's userdata load. g_mutex-serialized, so a launch
-    // racing the seed is safe. Tracked in g_bgThreads (joined at shutdown).
     if (MetadataSync::AchievementsEnabled() ||
         MetadataSync::PlaytimeEnabled()) {
         std::thread seed([] {
@@ -4779,19 +4967,12 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
         else
             g_bgThreads.push_back(std::move(seed));
     }
-
-    // Background: poll the cloud for another device's playtime advances and push the
-    // new totals into the running client's tracking map + library UI -- mirroring
-    // Steam's own CUser playtime refresh write path, minus the network round-trip.
-    // The writer must run on Steam's network thread, so we only enqueue here; the
-    // net-thread drain (DrainPlaytimeUpdateQueueOnNetThread) applies it.
     {
         std::thread poller([] {
             for (;;) {
                 for (int i = 0; i < 60 && !g_shuttingDown.load(); ++i)
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 if (g_shuttingDown.load()) return;
-                // Pure playtime feature: skip the cloud pull + live push when off.
                 if (!MetadataSync::PlaytimeEnabled()) continue;
                 auto changed = StatsStore::RefreshFromCloud(GetNamespaceApps());
                 if (changed.empty()) continue;
@@ -4803,7 +4984,6 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
         std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
         g_bgThreads.push_back(std::move(poller));
     }
-
     SteamKvInjector::Init();
 
 
@@ -4862,10 +5042,20 @@ void InstallManifestPinHook() {
         return;
     }
 
-    uintptr_t scBase = reinterpret_cast<uintptr_t>(hSteamClient);
-    g_bddOrigAddr = reinterpret_cast<uint8_t*>(scBase + SC_RVA_BUILD_DEPOT_DEPENDENCY);
-    LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p (base %p + 0x%X)",
-        g_bddOrigAddr, hSteamClient, SC_RVA_BUILD_DEPOT_DEPENDENCY);
+    // Ensure g_steamClientBase is set before SC_RESOLVE (which uses it as fallback).
+    // InstallManifestPinHook runs before FindCurrentUser / InstallServiceMethodHookLocked,
+    // so g_steamClientBase may still be zero at this point.
+    if (!g_steamClientBase)
+        g_steamClientBase = reinterpret_cast<uintptr_t>(hSteamClient);
+
+    // Run the auto-resolver so g_resolved.buildDepotDependency is populated
+    // (otherwise SC_RESOLVE falls back to the hardcoded RVA, which is fine but
+    // the resolver gives us the correct address on updated builds).
+    RunAutoResolver();
+
+    g_bddOrigAddr = reinterpret_cast<uint8_t*>(SC_RESOLVE(buildDepotDependency, SC_RVA_BUILD_DEPOT_DEPENDENCY));
+    LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p (base %p)",
+        g_bddOrigAddr, hSteamClient);
 
     // Verify the prologue bytes match what we expect from IDA:
     // 48 8B C4             mov rax, rsp
@@ -6383,7 +6573,7 @@ static void ShutdownImpl() {
             // the hardcoded RVA to still attempt restore.
             const uintptr_t vtableEa = g_serviceTransportVtableEa
                                        ? g_serviceTransportVtableEa
-                                       : (g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT);
+                                       : SC_RESOLVE(serviceTransportVtable, SC_RVA_SERVICE_TRANSPORT_VT);
             const uintptr_t vtableSlot4Addr = vtableEa + kSlot4Off;
             const uintptr_t vtableSlot5Addr = vtableEa + kSlot5Off;
             const uintptr_t vtableSlot7Addr = vtableEa + kSlot7Off;

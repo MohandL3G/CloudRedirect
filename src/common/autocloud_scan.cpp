@@ -648,6 +648,10 @@ ScanResult GetFileList(const std::string& steamPath,
     std::filesystem::path appUserdataDir = FileUtil::Utf8ToPath(steamPath) / "userdata" /
         std::to_string(accountId) / std::to_string(appId);
 
+    // Retain hashed bytes (up to a budget) so commit needn't re-read from disk.
+    constexpr uint64_t kMaxRetainedContentBytes = 512ULL * 1024 * 1024;
+    uint64_t retainedContentBytes = 0;
+
     auto addFile = [&](const std::filesystem::directory_entry& fileEntry,
                        const std::string& cloudPath,
                        const std::string& sourcePath,
@@ -679,6 +683,10 @@ ScanResult GetFileList(const std::string& steamPath,
         fe.rootToken = rootToken;
         fe.rootId = rootId;
         fe.sha = std::move(sha);
+        if (retainedContentBytes + bytes.size() <= kMaxRetainedContentBytes) {
+            retainedContentBytes += bytes.size();
+            fe.content = std::move(bytes);
+        }
         outResult.files.push_back(std::move(fe));
     };
 

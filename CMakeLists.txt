@@ -96,6 +96,8 @@ if(WIN32)
         src/platform/win/dllmain.cpp
         src/platform/win/cr_api.cpp
         src/platform/win/cloud_intercept.cpp
+        src/platform/win/sig_scanner.cpp
+        src/platform/win/sc_resolver.cpp
         src/platform/win/log.cpp
         src/platform/win/http_server.cpp
         src/platform/win/http_util.cpp
@@ -250,6 +252,7 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
     )
     target_include_directories(remotecache_repair_tests PRIVATE src/common)
     add_test(NAME remotecache_repair_tests COMMAND remotecache_repair_tests)
+
 
     add_executable(rpc_handlers_tests
         tests/rpc_handlers_tests.cpp

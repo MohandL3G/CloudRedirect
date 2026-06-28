@@ -48,6 +48,7 @@ modules:
       # ui-linux/CMakeLists.txt. Do NOT hardcode CR_RELEASE_VERSION here -- it
       # overrides Version.props and drifts out of sync.
       - -DCMAKE_BUILD_TYPE=Release
+
     sources:
       - type: dir
         path: ../ui-linux

@@ -2170,18 +2170,17 @@ RpcResult HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqBo
                                                  "FileDownload_Response.file_size",
                                                  appId, filename);
     PB::Writer body;
-    body.WriteVarint(1, appId);                      // appid
-    body.WriteVarint(2, clampedSize);                // file_size (compressed = same)
-    body.WriteVarint(3, clampedSize);                // raw_file_size
+    body.WriteVarint(1, appId);
+    body.WriteVarint(2, clampedSize);
+    body.WriteVarint(3, clampedSize);
     if (!sha.empty())
-        body.WriteBytes(4, sha.data(), sha.size());  // sha_file
-    body.WriteVarint(5, timestamp);                  // time_stamp
-    body.WriteVarint(6, 0);                          // is_explicit_delete = false
-    body.WriteString(7, urlHost);                    // url_host
-    body.WriteString(8, urlPath);                    // url_path
-    body.WriteVarint(9, 0);                          // use_https = false
-    // no request_headers (field 10)
-    body.WriteVarint(11, 0);                         // encrypted = false
+        body.WriteBytes(4, sha.data(), sha.size());
+    body.WriteVarint(5, timestamp);
+    body.WriteVarint(6, 0);
+    body.WriteString(7, urlHost);
+    body.WriteString(8, urlPath);
+    body.WriteVarint(9, 0);
+    body.WriteVarint(11, 0);
 
     return body;
 }
