@@ -1,0 +1,117 @@
+name: CI/CD Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_config:
+        description: Build configuration
+        required: true
+        default: Release
+        type: choice
+        options:
+          - Debug
+          - Release
+      build_platform:
+        description: Target platform(s)
+        required: true
+        default: windows
+        type: choice
+        options:
+          - windows
+          - linux
+          - both
+      run_tests:
+        description: Run tests after build
+        type: boolean
+        default: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  windows:
+    if: inputs.build_platform == 'windows' || inputs.build_platform == 'both'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Upgrade CMake (supports VS 2026)
+        run: choco upgrade cmake --install-if-not-installed -y --no-progress
+
+      - name: Configure CMake
+        run: cmake -B build -A x64
+
+      - name: Build core binaries
+        run: |
+          cmake --build build --config ${{ inputs.build_config }} --target cloud760_tool
+          cmake --build build --config ${{ inputs.build_config }} --target cloud_redirect_cli
+
+      - name: Prepare native resources for WPF UI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path ui/native -Force
+          Copy-Item "build/${{ inputs.build_config }}/cloud760_tool.exe" ui/native/ -Force
+          New-Item -Path ui/native/steam_api.dll -ItemType File
+
+      - name: Build WPF UI
+        run: cmake --build build --config ${{ inputs.build_config }} --target ui
+
+      - name: Run tests
+        if: inputs.run_tests
+        working-directory: build
+        run: ctest -C ${{ inputs.build_config }} --output-on-failure
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudredirect-windows-${{ inputs.build_config }}
+          path: |
+            build/${{ inputs.build_config }}/cloud_redirect.dll
+            build/${{ inputs.build_config }}/cloud_redirect_cli.exe
+            build/${{ inputs.build_config }}/cloud760_tool.exe
+            ui/bin/publish/
+
+  linux:
+    if: inputs.build_platform == 'linux' || inputs.build_platform == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake g++-multilib
+
+      - name: Configure CMake (32-bit cross-compile)
+        run: |
+          mkdir -p build-linux32
+          cmake -B build-linux32 -DCMAKE_BUILD_TYPE=${{ inputs.build_config }} \
+            -DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DLINUX_32BIT=ON
+
+      - name: Build
+        working-directory: build-linux32
+        run: make cloud_redirect -j$(nproc)
+
+      - name: Build and run tests
+        if: inputs.run_tests
+        working-directory: build-linux32
+        run: |
+          make -j$(nproc)
+          ctest --output-on-failure
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudredirect-linux-${{ inputs.build_config }}
+          path: build-linux32/cloud_redirect.so
